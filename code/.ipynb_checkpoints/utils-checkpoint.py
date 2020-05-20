@@ -1,0 +1,20 @@
+data_dir = '/scratch/users/gmachi/codex/data/'
+
+labels_dict = {"005": ("test", 0),
+            "006": ("test", 1),
+            "017": ("test", 1),
+            "019": ("test", 1),
+            "011": ("val", 0),
+            "016": ("val", 1),
+            "030": ("val", 1),
+            "023": ("val", 1),
+            "004": ("train", 0),
+            "015": ("train", 0),
+            "014": ("train", 1),
+            "024": ("train", 1),
+            "020": ("train", 1),
+            "007": ("train", 1),
+            "008": ("train", 1),
+            "027": ("train", 1),
+            "034": ("train", 1),
+            "012": ("train", 1)} 
