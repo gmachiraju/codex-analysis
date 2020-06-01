@@ -1,7 +1,8 @@
-from tensorflow import metrics, local_variables_initializer
+# from tensorflow import metrics, local_variables_initializer
 # from keras.backend import get_session
+# import pandas as pd
 from sklearn.metrics import roc_auc_score as skroc
-import tensorflow as tf
+# import tensorflow as tf
 import matplotlib.pyplot as plt
 import numpy as np
 
