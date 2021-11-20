@@ -1,0 +1,16 @@
+/__MACOSX/
+/code/bitmaps/
+/code/extra_code/
+/code/figs/
+/code/old_tempfiles/
+/code/Older_Notebooks/
+/code/outputs/
+/code/run_scripts/old/
+/code/run_scripts/.ipynb_checkpoints/
+/code/__pycache__/
+/code/.ipynb_checkpoints/
+/data_u54/
+/models/
+/pcam/
+/runs/
+
