@@ -15,10 +15,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
 import gc # grabage collect for memory issues
+from PIL import Image
 
 import utils
 from utils import labels_dict, reg_dict, ctrl_dict, str2bool
 import argparse
+
+import h5py
+import torch
+from torchvision import transforms
+import torchstain
+import cv2
+
+normalize_refpath = "/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/ref_imgs/target.png"
+# import stain_norm
 
 # constants
 random.seed(100)
@@ -327,30 +337,80 @@ def axis_reflect(tile, axis):
     return np.flip(tile, axis)
 
 
-def normalize(im, dataset_name):
-    # toss blank channels if they exist
+def fit_normalizer(norm_type="macenko"):
+    if norm_type == "macenko":
+        # reference image
+        target = cv2.imread(normalize_refpath)
+        target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
+
+        transform_fn = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: x*255)
+        ])
+
+        normalize_fn = torchstain.MacenkoNormalizer(backend='torch')
+        normalize_fn.fit(transform_fn(target))
+
+    elif norm_type == "vahadane":
+        normalize_fn = stain_norm.Normalizer()
+        normalize_fn.fit(normalize_refpath)
+        transform_fn = lambda x: x # dummy function
+
+    else:
+        print("please choose valid normalization type, or default to vahadane")
+        exit()
+
+    return transform_fn, normalize_fn
+
+
+def normalize(im, dataset_name, transform_fn=None, normalize_fn=None):
+    # really a standardization process
     if dataset_name == "u54codex":
+        # toss blank channels if they exist
         null_channels = [82, 81, 79, 78, 77, 74, 73, 69, 65]
         im = np.delete(im, null_channels, axis=0)
     
-    channel_means1 = np.mean(im, axis=(1,2)).reshape(-1,1,1)
-    # channel_means2 = np.mean(im, axis=(1,2)).reshape(im.shape[0], 1, 1)
-    # print(channel_means1 == channel_means2)
-    
-    new_im = im - channel_means1
-    new_im /= (np.std(new_im, axis=(1,2)).reshape(-1,1,1) + 1e-5)
+        channel_means1 = np.mean(im, axis=(1,2)).reshape(-1,1,1)
+        # channel_means2 = np.mean(im, axis=(1,2)).reshape(im.shape[0], 1, 1)
+        # print(channel_means1 == channel_means2)
+        
+        new_im = im - channel_means1
+        new_im /= (np.std(new_im, axis=(1,2)).reshape(-1,1,1) + 1e-5)
+
+    elif dataset_name == "cam":
+        channel, imgwidth, imgheight = im.shape
+        im = im.reshape(imgwidth, imgheight, channel)
+        im = transform_fn(im)
+        # pdb.set_trace()
+
+        im, H, E = normalize_fn.normalize(I=im, stains=True)
+        del H
+        del E
+        im = im.cpu().detach().numpy()
+        new_im = im.reshape(channel, imgwidth, imgheight)
+
+    else:
+        new_im = im
 
     return new_im
 
 
-def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05):
+
+def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05, thresh_tile=None):
     """
     Toss out tiles with >=80% low intensity pixels
     OR toss out middle values..... you set the filtering function!
     """
-    if dataset_name == "u54codex":
+    if dataset_name == "u54codex" :
         summed = np.sum(im, 0)
         if np.mean(summed < q) > 0.8:
+            return True
+        return False
+
+    elif dataset_name == "cam":
+        summed = np.sum(im, 0)
+        # pdb.set_trace()
+        if np.mean(summed > q) > 0.5 and np.mean(thresh_tile) < 0.6: # 0.75,0.5
             return True
         return False
 
@@ -363,33 +423,75 @@ def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05):
         return False
 
 
-def crop_coords(im, height, width, shift="noshift"):
+def crop_coords(im, height, width, shift="noshift", doubling_flag=False):
     """
     solely returns coordinates for an image
     notes: https://stackoverflow.com/questions/5953373/how-to-split-image-into-multiple-pieces-in-python
     """
-    # translate image to the right and down 50%
-    if shift == "50shift":
-        im = im[:, height // 2:, width // 2:]
+    # # translate image to the right and down 50%
+    # if shift == "50shift":
+    #     im = im[:, args.HW // 2:, args.HW // 2:]
 
     channel, imgheight, imgwidth = im.shape
 
-    # top-bottom, left-right
-    for i in range(imgheight // height):
-        for j in range(imgwidth // width):
-            yield [i * height, (i + 1) * height, j * width, (j + 1) * width] #x1,x2,y1,y2
-
-
-def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_tossed, patch_count_i):
+    if shift == "noshift" or (shift=="50shift" and doubling_flag==True):
+        # top-bottom, left-right
+        for i in range(imgheight // height):
+            for j in range(imgwidth // width):
+                yield [i * height, (i + 1) * height, j * width, (j + 1) * width] #x1,x2,y1,y2
     
+    elif shift == "50shift": 
+        eps = height // 2
+        for i in range(imgheight // height):
+            for j in range(imgwidth // width):
+                # if ((((i + 1) * height) + eps) < imgheight) and ((((j + 1) * width) + eps) < imgwidth):
+                yield [(i * height) + eps, ((i + 1) * height) + eps, (j * width) + eps, ((j + 1) * width) + eps] #x1,x2,y1,y2
+    
+
+
+def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_tossed, patch_count_i, thresh_im=None):
+
+    saved_flag = False
     channel, imgheight, imgwidth = im.shape
+
+    # print("Your image is of shape:", im.shape)
+    # print(im_id)
+
+    # # debugging
+    # print("your image's shape is:", im.shape)
+    # pdb.set_trace()
+    # np.save(args.save_dir + '/' + "tester-img.npy", np.asarray(im, dtype=np.uint8))
+    # print(im[ 12096:12320,2464:2688, :])
+    # pdb.set_trace()
+
+    # make HDF5 dataset
+    if args.hdf5_flag == True:
+        hdf5_filename = args.study_arm + '.hdf5'
+        hdf5_savepath = args.save_dir + '/' + hdf5_filename
+        hf = h5py.File(hdf5_savepath, 'a') # open a hdf5 file
+        # hf.close()
 
     # make grid
     num_cols = int(imgwidth // args.HW) # should be floor right? used to be ceil
     num_rows = int(imgheight // args.HW)
     grid = np.zeros((num_rows, num_cols))
 
-    for k, coords_list in enumerate(crop_coords(im, args.HW, args.HW, shift=shift)):
+    # if args.dataset_name == "cam":
+    #     transform_fn, normalize_fn = fit_normalizer(norm_type="macenko")
+
+    if args.dataset_name == "cam":
+        reshaped_im = im.reshape(imgheight, imgwidth, channel)
+
+    # repeating data examples - jsut for controls
+    if args.dataset_name == "controls":
+        d_flag = True
+    else:
+        d_flag = False
+
+
+    # iterate over patches
+    #----------------------
+    for k, coords_list in enumerate(crop_coords(im, args.HW, args.HW, shift=shift, doubling_flag=d_flag)):
 
         # get patch coordinate
         [x1, x2, y1, y2] = coords_list
@@ -398,46 +500,119 @@ def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_
         curr_col = int(y2 / args.HW) - 1 #int(((k+1) % num_cols) - 1)
 
         # tile/patch slice!
-        tile = im[:, x1:x2, y1:y2]
+        if args.dataset_name == "cam":
+            tile = reshaped_im[x1:x2, y1:y2, :]
+            tileh, tilew, tilec = tile.shape
+            tile = tile.reshape(tilec, tileh, tilew)
+        else:
+            tile = im[:, x1:x2, y1:y2]
+
+        # resize if needed - not implemented yet
+        # if args.resize_flag == True and args.resize_HW is not None:
+        #     # print("resizeing the saved patch")
+        #     pass
+
+        if args.dataset_name == "cam":
+            thresh_tile = thresh_im[x1:x2, y1:y2]
+
+        #debugging
+        # if k == 0:
+        #     np.save(args.save_dir + '/' + "tester-pre.npy", np.asarray(tile, dtype=np.uint8))
+        #     # pdb.set_trace()
 
         # checks for valid tile/patch
+        #-----------------------------
+        # is patch the valid size?
         if tile.shape[1] != args.HW or tile.shape[2] != args.HW: # not square patch
             patch_tossed_i += 1
             patch_tossed += 1
             continue
-        if args.filtration_type == "background": # if not, we keep all patches including noisy background
-            if toss_blank_tile(tile, q_low, args.dataset_name): # blank patch
+
+        # for cam, want to ignore borders
+        if args.dataset_name == "cam":
+            # print("image is of size:", im.shape)
+            # print("curr_row", curr_row, "imgheight", imgheight, "imgwidth", imgwidth, x1, x2)
+            if curr_row < (imgheight * (1/6) / args.HW) or curr_row > (imgheight * (5/6) / args.HW):
+                patch_tossed_i += 1
+                patch_tossed += 1
+                del tile
+                #print("patch in top or bottom 1/6th of slide. skipping...")
+                continue
+            if curr_col < (imgwidth * (1/8) / args.HW) or curr_col > (imgwidth * (7/8) / args.HW):
                 patch_tossed_i += 1
                 patch_tossed += 1
                 del tile
                 continue
-        
+
+        if args.filtration_type == "background": # if not, we keep all patches including noisy background
+            if toss_blank_tile(tile, q_low, args.dataset_name, thresh_tile=thresh_tile): # blank patch
+                patch_tossed_i += 1
+                patch_tossed += 1
+                del tile
+                continue
+
+        # debugging
+        # print("your patch's shape is:", tile.shape)
+        # np.save(args.save_dir + '/' + "tester.npy", np.asarray(tile, dtype=np.uint8))
+        # tile_str = "%s_patch%s_coords%s-%s-[%s:%s,%s:%s]_%s_noaug" % (im_id, k, curr_row, curr_col, x1, x2, y1, y2, shift)
+        # print(tile_str)
+        # # pdb.set_trace()
+        # exit()
+
+
+        #NORMALIZE?
+        #----------
+        # if args.dataset_name == "cam":
+        #     tile = normalize(tile, args.dataset_name, transform_fn, normalize_fn)
+
         # non-aug patch
+        #---------------
         tile_str = "%s_patch%s_coords%s-%s-[%s:%s,%s:%s]_%s_noaug" % (im_id, k, curr_row, curr_col, x1, x2, y1, y2, shift)
         patches.append(tile_str)
         if args.prepatch_flag == True:
-            np.save(args.save_dir + '/' + tile_str, tile)
+            if args.hdf5_flag == True:
+                # hf = h5py.File(hdf5_savepath, 'a') # open again
+                dset = hf.create_dataset(tile_str, data=tile)  # write the data to hdf5 file
+                # hf.close()  # close the hdf5 file
+                del dset
+            else:
+                np.save(args.save_dir + '/' + tile_str, tile)
+            saved_flag = True
 
         patch_count_i += 1 
         # update grid
         grid[curr_row, curr_col] = 1
 
+        # add any tiles/patches if augmentation enabled
         if args.study_arm == "train": 
-            
             if args.augment_level == "high":
                 for rot in [1, 2, 3]:
                     tile_str = "%s_patch%s_coords%s-%s-[%s:%s,%s:%s]_%s_rot%s" % (im_id, k, curr_row, curr_col, x1, x2, y1, y2, shift, rot)
                     patches.append(tile_str)
                     if args.prepatch_flag == True:
                         tile = axis_rotate(tile, rot)
-                        np.save(args.save_dir + '/' + tile_str, tile)
-                
+                        if args.hdf5_flag == True:
+                            # hf = h5py.File(hdf5_savepath, 'a') # open again
+                            dset = hf.create_dataset(tile_str, data=tile)  # write the data to hdf5 file
+                            # hf.close()  # close the hdf5 file
+                            del dset
+                        else:
+                            np.save(args.save_dir + '/' + tile_str, tile)
+                        saved_flag = True
+
                 for refl in [0, 1]:
                     tile_str = "%s_patch%s_coords%s-%s-[%s:%s,%s:%s]_%s_refl%s" % (im_id, k, curr_row, curr_col, x1, x2, y1, y2, shift, refl)
                     patches.append(tile_str)
                     if args.prepatch_flag == True:
                         tile = axis_reflect(tile, refl)
-                        np.save(args.save_dir + '/' + tile_str, tile)
+                        if args.hdf5_flag == True:
+                            # hf = h5py.File(hdf5_savepath, 'a') # open again
+                            dset = hf.create_dataset(tile_str, data=tile)  # write the data to hdf5 file
+                            # hf.close()  # close the hdf5 file
+                            del dset
+                        else:
+                            np.save(args.save_dir + '/' + tile_str, tile)
+                        saved_flag = True
 
             elif args.augment_level == "low":
                 # Random rotation
@@ -445,15 +620,36 @@ def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_
                 tile_str = "%s_patch%s_coords%s-%s-[%s:%s,%s:%s]_%s_rot%s" % (im_id, k, curr_row, curr_col, x1, x2, y1, y2, shift, rot)
                 patches.append(tile_str)
                 if args.prepatch_flag == True:
-                    np.save(args.save_dir + '/' + tile_str, tile)
-                
+                    if args.hdf5_flag == True:
+                        # hf = h5py.File(hdf5_savepath, 'a') # open again
+                        dset = hf.create_dataset(tile_str, data=tile)  # write the data to hdf5 file
+                        # hf.close()  # close the hdf5 file
+                        del dset
+                    else:
+                        np.save(args.save_dir + '/' + tile_str, tile)
+                    saved_flag = True
+     
                 # Random reflection
                 tile, refl = random_reflect(tile)
                 tile_str = "%s_patch%s_coords%s-%s-[%s:%s,%s:%s]_%s_refl%s" % (im_id, k, curr_row, curr_col, x1, x2, y1, y2, shift, refl)
                 patches.append(tile_str)
                 if args.prepatch_flag == True:
-                    np.save(args.save_dir + '/' + tile_str, tile)
+                    if args.hdf5_flag == True:
+                        # hf = h5py.File(hdf5_savepath, 'a') # open again
+                        dset = hf.create_dataset(tile_str, data=tile)  # write the data to hdf5 file
+                        # hf.close()  # close the hdf5 file
+                        del dset
+                    else:
+                        np.save(args.save_dir + '/' + tile_str, tile)
+                    saved_flag = True
+
         del tile
+        # print(saved_flag)
+
+
+    # make HDF5 dataset
+    if args.hdf5_flag == True:
+        hf.close()  # close the hdf5 file
 
     if shift == "noshift" and args.verbosity_flag == True:
         print_grid(grid)
@@ -483,6 +679,16 @@ def print_grid(grid):
         row_str = "|" + ''.join(row_str) + "|" 
         print(row_str)
     print("+" + "-"*num_cols + "+")
+
+
+def otsu_thresh(im):
+    #rgb -> gray
+    g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    # Otsu's thresholding
+    ret,th = cv2.threshold(g,0,1,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+    # pdb.set_trace()
+    # thresh_im = np.multiply(np.array(im), np.repeat(np.expand_dims(1-th,2),3,2))
+    return 1-th
 
 
 def patchify(args):
@@ -533,20 +739,26 @@ def patchify(args):
     patch_tossed = 0
     patches = []
 
-    if args.dataset_name == "controls":
+    if args.dataset_name == "controls" or args.dataset_name == "cam":
         splitlab_dict = {}
+
+    if args.dataset_name == "cam":
+        transform_fn, normalize_fn = fit_normalizer(norm_type="macenko")
+
 
     #################
     # FILE ITERATION
     #################
     for filename in files:
+        print("="*60)
+        print('\nCurrently on file {}'.format(filename))
 
         # run only on valid files in dir
         if args.dataset_name == "u54codex":
             if not filename.endswith(".tif"):
                 continue
 
-        elif args.dataset_name == "controls":
+        elif args.dataset_name == "controls" or args.dataset_name == "cam":
             if not filename.endswith(".npy"):
                 continue
 
@@ -558,13 +770,49 @@ def patchify(args):
             cycle, channel, imgwidth, imgheight = im.shape
             im = im.reshape(cycle * channel, imgwidth, imgheight)
 
-        elif args.dataset_name == "controls":
+        elif args.dataset_name == "controls" or args.dataset_name == "cam":
             im = np.load(os.path.join(args.data_dir, filename))
-            imgwidth, imgheight, channel = im.shape
+
+            # debugging
+            # print("your image's shape is:", im.shape)
+            # np.save(args.save_dir + '/' + "tester-img-loaded.npy", np.asarray(im, dtype=np.uint8))
+            # print(im[12096:12320, 2464:2688, :])
+            # pdb.set_trace()
+
+            try:
+                imgwidth, imgheight, channel = im.shape
+            except ValueError: # dimension mismatch
+                if len(im.shape) == 2:
+                    im = np.expand_dims(im, axis=2) # reflect above
+                    imgwidth, imgheight, channel = im.shape
+
+            if args.dataset_name == "cam":
+                 # perform otsu
+                im_copy = np.copy(im)
+                thresh_im = otsu_thresh(im)
+                im = np.copy(im_copy)
+                del im_copy
+                print("Finished Otsu thresholding!")
+            
             im = im.reshape(channel, imgwidth, imgheight)
 
+        # debugging
+        # print("your image's shape is:", im.shape)
+        # np.save(args.save_dir + '/' + "tester-img-prepatch.npy", np.asarray(im, dtype=np.uint8))
+        # im = im.reshape(imgwidth, imgheight, channel)
+        # print(im[12096:12320, 2464:2688, :])
+        # pdb.set_trace()
+   
         # parse names
-        if args.dataset_name == "u54codex":
+        if args.dataset_name == "cam":
+            im_id = filename.split(".")[0]  # "label_{idx}", e.g. normal_001
+            idx = im_id.split("_")[1]  # {idx}
+            if "normal" in im_id:
+                splitlab_dict[im_id] = 0
+            else: # tumor
+                splitlab_dict[im_id] = 1
+
+        elif args.dataset_name == "u54codex":
             im_folder = filename.split(".")[0]  # "reg{idx}_montage"
             im_id = im_folder.split("_")[0]  # "reg{idx}""
             idx = im_id.split("reg")[1]  # {idx}
@@ -573,58 +821,86 @@ def patchify(args):
                 continue
 
         elif args.dataset_name == "controls":
-            im_folder = filename.split(".")[0]  # "reg{idx}_XXX"
-            im_id = im_folder.split("-")[0]  # "reg{idx}""
-            idx = im_id.split("reg")[1]  # {idx}
-
-            # dictionary creation
-            if "morphological" in args.cache_name: 
-                if "canary" in im_folder:
-                    if any(word in im_folder for word in ["sin", "cos", "affine"]):
-                        splitlab_dict[im_id] = 1
-                    else:
-                        splitlab_dict[im_id] = 0
+            # pathology-like
+            if ("morphological" in args.cache_name) and ("superpixels" in args.cache_name):
+                histopath_flag = True
+                # S11100003_P495_subject310_stitched_labelS.npy
+                im_folder = filename.split(".")[0]  # "S11100003_P495_subject310_stitched_labelS"
+                im_id = "-".join(im_folder.split("_")[0:3])  # "S11100003_P495_subject310""
+                # idx = im_id.split("subject")[1]  # {idx}
+                if "labelA" in im_folder:
+                    splitlab_dict[im_id] = 0
                 else:
                     splitlab_dict[im_id] = 1
+                print("histopath?",histopath_flag,". Image:", im_id, ". label=", splitlab_dict[im_id])
 
-            elif "guilty" in args.cache_name: # just for guilty superpixels
-                if "guilty" in im_folder:
-                    splitlab_dict[im_id] = 1 
+            else: # non-pathology data
+                histopath_flag = False
+                im_folder = filename.split(".")[0]  # "reg{idx}_XXX"
+                im_id = im_folder.split("-")[0]  # "reg{idx}""
+                idx = im_id.split("reg")[1]  # {idx}
+
+                # dictionary creation
+                if "morphological" in args.cache_name: 
+                    if "canary" in im_folder:
+                        if any(word in im_folder for word in ["sin", "cos", "affine"]):
+                            splitlab_dict[im_id] = 1
+                        else:
+                            splitlab_dict[im_id] = 0
+                    else:
+                        splitlab_dict[im_id] = 1
+
+                elif "guilty" in args.cache_name: # just for guilty superpixels
+                    if "guilty" in im_folder:
+                        splitlab_dict[im_id] = 1 
+                    else:
+                        splitlab_dict[im_id] = 0
+
+                elif "fractal" in args.cache_name:
+                    if "fractal" in im_folder:
+                        splitlab_dict[im_id] = 1 
+                    else:
+                        splitlab_dict[im_id] = 0
+
                 else:
-                    splitlab_dict[im_id] = 0
+                    temp = im_folder.split("-")[-2]
+                    if temp == "hot":
+                        splitlab_dict[im_id] = 1                    
+                    elif temp == "cold":
+                        splitlab_dict[im_id] = 0
 
-            elif "fractal" in args.cache_name:
-                if "fractal" in im_folder:
-                    splitlab_dict[im_id] = 1 
-                else:
-                    splitlab_dict[im_id] = 0
-
-            else:
-                temp = im_folder.split("-")[-2]
-                if temp == "hot":
-                    splitlab_dict[im_id] = 1                    
-                elif temp == "cold":
-                    splitlab_dict[im_id] = 0
-            # print("current label dict:", splitlab_dict)
+            print("current label dict length:", len(splitlab_dict))
       
-        print("="*60)
-        print('\nCurrently on file {}'.format(filename))
+
         print('Original image dimensions (in pixels): {}'.format(im.shape) + "\n" + "="*60)
         image_count += 1
         # channel, imgheight, imgwidth = im.shape
 
         # Normalize Image + toss blank channels
         if args.dataset_name == "u54codex":
-            im = normalize(im, dataset_name)
+            im = normalize(im, args.dataset_name)
 
+        # skipping stain normalization for now
+        #---------------------------------------
+        # elif args.dataset_name == "cam":
+        #     im = normalize(im, args.dataset_name, transform_fn, normalize_fn)
+        #     print("finished normalizing the path image")
+
+        # find low intensity threshold
         if args.filtration_type == "background":
             # Identify low-intensity threshold
             if args.dataset_name == "u54codex":
                 im_sum = np.sum(im, axis=0) # Does this make sense?
                 q_low = np.quantile(im_sum, q=0.1)
+            elif args.dataset_name == "cam":
+                im_sum = np.sum(im, axis=0) # calculating summed intensities over all channels
+                q_low = np.quantile(im_sum, q=0.08) # bump up the threshold a bit from codex
 
             if args.dataset_name == "controls":
-                q_low = 0.5
+                if histopath_flag == False:
+                    q_low = 0.5
+                else:
+                    q_low = 0 # black/zero background in pathology like images
         else:
             q_low = None # dummy
             
@@ -642,17 +918,20 @@ def patchify(args):
                 print('Left-edge cropping...')
             else:
                 print('50-percent shifted cropping...')
-            patch_tossed_i, patch_tossed, patch_count_i, patches = process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_tossed, patch_count_i)
+            patch_tossed_i, patch_tossed, patch_count_i, patches = process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_tossed, patch_count_i, thresh_im)
 
         print('Images completed: {}, Previous image patches (non-augmented): {}, total patches: {}, tossed: {}, total tossed: {}\n'.format(image_count, patch_count_i, len(patches), patch_tossed_i, patch_tossed))
         # pdb.set_trace()
         gc.collect()
+
+        # # TOGGLE OFF IF NOT TESTING
+        # break
     
     # always serialize if want to keep order
     print("Serializing patch list!")
     utils.serialize(patches, args.cache_dir + "/outputs/" + args.study_arm + "-" + args.cache_full_name + "-patchlist.obj")    
     
-    if args.dataset_name == "controls":
+    if args.dataset_name == "controls" or args.dataset_name == "cam":
         print("Serializing label dictionary for controls")
         utils.serialize(splitlab_dict, args.cache_dir + "/outputs/" + args.study_arm + "-" + args.cache_full_name + "-labeldict.obj")    
 
@@ -665,7 +944,11 @@ def generate_ground_truths(path):
     print("Processing a total of", len(os.listdir(path)), "patches")
 
     for k, pn in enumerate(os.listdir(path)):
+                    
         contents = pn.split("_")
+        # print(contents)
+        # pdb.set_trace()
+        
         regi = contents[0]
         patchnum = int(contents[1].split("patch")[1])
         coords = contents[2]
@@ -673,6 +956,7 @@ def generate_ground_truths(path):
         aug = contents[4].split(".npy")[0]
         if aug != "noaug":
             continue # only interested in non-augmented patches
+        
 
         ii = int(coords.split("-")[0].split("coords")[1])
         jj = int(coords.split("-")[1])
@@ -712,14 +996,21 @@ def generate_ground_truths(path):
 
 
 def get_imgdims(img_path, HW):
-
     imgdim_dict = {}
+
     for k,im_str in enumerate(os.listdir(img_path)):
         print(im_str)
-        
-        regi = im_str.split("-")[0]
+        # pdb.set_trace()
+
+        if "subject" in im_str: # hard code for pathology controls
+            im_folder = im_str.split(".")[0]  # "S11100003_P495_subject310_stitched_labelS"
+            regi = "-".join(im_folder.split("_")[0:3])  # "S11100003_P495_subject310""
+
+        elif "reg" in im_str: # hard code for non-pathology controls
+            regi = im_str.split("-")[0]
+
         im = np.load(img_path + "/" + im_str)
-        maxH, maxW, _ = im.shape
+        maxH, maxW = im.shape[0:2]
         
         num_cols = int(np.floor(maxW / HW))
         num_rows = int(np.floor(maxH / HW))
@@ -733,8 +1024,10 @@ def get_imgdims(img_path, HW):
 
 def generate_ppm_ground_truths(gt_dict, imgdim_dict, buff=0):
     ppmgt_dict = {}
+    print(gt_dict)
+    print(imgdim_dict)
+
     for regi in gt_dict.keys():
-        
         ppmgt_dict[regi] = [np.ones((imgdim_dict[regi][0]+1, imgdim_dict[regi][1]+1)) *-1, np.ones((imgdim_dict[regi][0]+1, imgdim_dict[regi][1]+1)) *-1]
         
         print("Generating Ground Truth PPM for image:", regi)
@@ -750,6 +1043,33 @@ def generate_ppm_ground_truths(gt_dict, imgdim_dict, buff=0):
             ii,jj = p[0], p[1]
             pmean = p[2]
             ppmgt_dict[regi][1][ii,jj] = pmean + buff
+
+    return ppmgt_dict
+
+
+def generate_ppm_ground_truths_from_labels(seg_lab_dict, gt_dict, imgdim_dict, buff=0):
+    ppmgt_dict = {}
+    print(gt_dict)
+    print(imgdim_dict)
+
+    for regi in gt_dict.keys():
+        ppmgt_dict[regi] = [np.ones((imgdim_dict[regi][0]+1, imgdim_dict[regi][1]+1)) *-1, np.ones((imgdim_dict[regi][0]+1, imgdim_dict[regi][1]+1)) *-1]
+        
+        print("Generating Ground Truth PPM for image:", regi)
+        print("dims:", imgdim_dict[regi][0], imgdim_dict[regi][1])
+        print("num patches:",len(gt_dict[regi][0]), len(gt_dict[regi][1]))
+        print("maxes:", gt_dict[regi][2],gt_dict[regi][3])
+
+        for p in gt_dict[regi][0]: # no shift patches
+            ii,jj = p[0], p[1]
+            pmean = p[2]
+            lab = seg_lab_dict[(regi, "noshift", ii, jj)] # plus 1 for ii,jj?
+            ppmgt_dict[regi][0][ii,jj] = lab + buff
+        for p in gt_dict[regi][1]: # 50 shift patches
+            ii,jj = p[0], p[1]
+            pmean = p[2]
+            lab = seg_lab_dict[(regi, "50shift", ii, jj)] # plus 1 for ii,jj?
+            ppmgt_dict[regi][1][ii,jj] = lab + buff
 
     return ppmgt_dict
 
@@ -803,8 +1123,11 @@ def main():
     parser.add_argument('--study_arm', default="train", type=str, help='Study arm: train/val/test. Deafult is train.')
     parser.add_argument('--cache_name', default=None, type=str, help="Name associated with the cached objects. For example, for controls partitions/scenarios, please name the partition.")
     parser.add_argument('--HW', default=96, type=int, help="Patch size. Default is 96.")
+    parser.add_argument('--resize_flag', default=False, type=str2bool, help="T/F if patches are to be resized to another dimension.")
+    parser.add_argument('--resize_HW', default=96, type=int, help="Dimension to resize to. Requires resize_flag=True.")
+
     parser.add_argument('--augment_level', default="none", type=str, help="Level of augmentation: none/low/high. Default is none.")
-    parser.add_argument('--filtration_type', default="background", type=str, help="Filtration type. Defaults to background filtration.")
+    parser.add_argument('--filtration_type', default="background", type=str, help="Filtration type: {background, none}. Defaults to background filtration.")
     parser.add_argument('--prepatch_flag', default=False, type=str2bool, help="T/F if patches are stored/saved at the directory, save_dir.")
     parser.add_argument('--overwrite_flag', default=False, type=str2bool, help="Warning! This can take up to 3 hours if overwrite=True! Do you want to overwrite patch dataset? Refers to save_dir.")
     parser.add_argument('--save_dir', default=None, type=str, help="Where to save patches if prepatch_flag=True. Otherwise, not used.")
@@ -812,6 +1135,8 @@ def main():
     parser.add_argument('--verbosity_flag', default=False, type=str2bool, help="Do you want CLI printouts of patches? Default is True.")
     parser.add_argument('--control_groundtruth_flag', default=False, type=str2bool, help="Do you want to create ground truths? Only works if dataset name = controls.")
     parser.add_argument('--overwrite_gt_flag', default=False, type=str2bool, help="Do you want to create NEW ground truths?")
+
+    parser.add_argument('--hdf5_flag', default=False, type=str2bool, help="Do you want to store the patches as HDF5?")
 
     args = parser.parse_args()
 
@@ -831,8 +1156,16 @@ def main():
     cache_full_name = args.dataset_name + "-" + args.cache_name + "-" + str(args.HW) + "-" + args.filtration_type
     setattr(args, "cache_full_name", cache_full_name)
 
+    # MAIN CALL
+    #==========
     patchify(args)
     # pdb.set_trace()
+
+    mil_runs = ["cam", "guilty_superpixels"]
+
+    if args.control_groundtruth_flag == False and args.study_arm == "test" and args.dataset_name == "cam":
+        print("OOPS...Not implemented! Sorry. Please implement.")
+
 
     if args.control_groundtruth_flag == True and args.study_arm == "test" and args.dataset_name == "controls":
         out_dir = args.cache_dir + "/outputs/"
@@ -854,16 +1187,72 @@ def main():
         utils.serialize(ppmgts, out_dir + cache_full_name + "-ppmgts.obj")
         utils.serialize(imgdim_dict, out_dir + cache_full_name + "-imgdim_dict.obj")
 
+        # seg labels for test-gsp:
+        if args.cache_name in mil_runs:
+            print("creating seg-like label dictionary...")
+            seg_lab_dict = {}
+            for reg in gt_dict.keys():
+                for i,shift in enumerate(["noshift","50shift"]):
+                    for patch in gt_dict[reg][i]:
+                        patch_mean = np.array([patch[2]])
+                        thresholded = np.where((patch_mean < 0.5) & (patch_mean >= 0), 0, 1)
+                        seg_lab_dict[(reg, shift, patch[0], patch[1])] = thresholded[0]
+            
+            utils.serialize(seg_lab_dict, out_dir + cache_full_name + "-seg_labels_TEST.obj")
+            # ppmgt_dict_seg = generate_ppm_ground_truths_from_labels(seg_lab_dict, gt_dict, imgdim_dict)
+            # ppmgts_seg = create_overlay_ppmgts(ppmgt_dict_seg)
+            # utils.serialize(ppmgts_seg, out_dir + cache_full_name + "-ppmgts-SEG_TEST.obj")
+
+            # gt_save_path2 = args.cache_dir + "/bitmaps/ground_truths/seg_labels/" + args.cache_full_name + "/"
+            # if not os.path.exists(gt_save_path2):
+            #     os.makedirs(gt_save_path2)
+            #     print("creating a directory at", gt_save_path2)
+            # for key in ppmgts_seg.keys():
+            #     print("saving ground truth for", key)
+            #     np.save(gt_save_path2 + key, ppmgts_seg[key]) 
+
         # save gt PPMs
         gt_save_path = args.cache_dir + "/bitmaps/ground_truths/" + args.cache_full_name + "/"
         if not os.path.exists(gt_save_path):
             os.makedirs(gt_save_path)
             print("creating a directory at", gt_save_path)
-
         for key in ppmgts.keys():
             print("saving ground truth for", key)
             np.save(gt_save_path + key, ppmgts[key]) 
+    else:
+        print("Finishing up!")
 
+
+    # train on gsp
+    if args.control_groundtruth_flag == True and args.study_arm == "train" and args.dataset_name == "controls" and args.cache_name in mil_runs:
+        out_dir = args.cache_dir + "/outputs/"
+        print("generating ground truths for MIL-like training run to potentially be used as labels!")
+
+        # saving time here if dictionary already exists
+        if not os.path.exists(out_dir + cache_full_name + "-gt_dict_TRAIN.obj") or args.overwrite_gt_flag == True:
+            print("overwriting or creating new ground truth dictionary...")
+            gt_dict = generate_ground_truths(args.save_dir)
+            utils.serialize(gt_dict, out_dir + cache_full_name + "-gt_dict_TRAIN.obj")
+        else: 
+            print("using old ground truth dictionary...")
+            gt_dict = utils.deserialize(out_dir + cache_full_name + "-gt_dict_TRAIN.obj")
+
+        # if not os.path.exists(out_dir + cache_full_name + "-seg_labels_TRAIN.obj") or args.overwrite_gt_flag == True:
+        print("creating seg-like label dictionary...")
+        seg_lab_dict = {}
+        for reg in gt_dict.keys():
+            for i,shift in enumerate(["noshift","50shift"]):
+                for patch in gt_dict[reg][i]:
+                    patch_mean = np.array([patch[2]])
+                    thresholded = np.where((patch_mean < 0.5) & (patch_mean >= 0), 0, 1)
+                    seg_lab_dict[(reg, shift, patch[0], patch[1])] = thresholded[0]
+        
+        utils.serialize(seg_lab_dict, out_dir + cache_full_name + "-seg_labels_TRAIN.obj")
+        # ppmgt_dict_seg = generate_ppm_ground_truths_from_labels(seg_lab_dict, gt_dict, imgdim_dict)
+        # ppmgts_seg = create_overlay_ppmgts(ppmgt_dict_seg)
+        # utils.serialize(ppmgts_seg, out_dir + cache_full_name + "-ppmgts-SEG_TRAIN.obj")
+        # else:
+        #     print("Seeing old seg-like label dictionary! Skipping!")
     else:
         print("Finishing up!")
 

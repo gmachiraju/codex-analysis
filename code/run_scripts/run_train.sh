@@ -1,21 +1,21 @@
 #!/bin/bash
-#SBATCH --time=30:00:00
+#SBATCH --time=65:00:00
 #SBATCH --mem=24G
-#SBATCH --output=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train_VGG_att.out
-#SBATCH --error=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train_VGG_att.err
+#SBATCH --output=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train.out
+#SBATCH --error=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train.err
 #SBATCH --partition=andrewg
 #SBATCH --gres gpu:1
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=gmachi@stanford.edu
-#SBATCH --job-name=VGG_att_fm
+#SBATCH --job-name=19_gsp-seg-bg
 
 module load python/3.6.1
 source /home/users/gmachi/anaconda3/etc/profile.d/conda.sh
 conda activate /home/users/gmachi/anaconda3/envs/codex
 
 # ================= MODIFY =========================
-model_class=VGG_att
-scenario=fractal_morphologies
+model_class=VGG19
+scenario=guilty_superpixels
 
 # model_class: {VGG19, VGG_att}
 # scenario:
@@ -24,28 +24,36 @@ scenario=fractal_morphologies
 #      extreme_value_superpixels
 #      guilty_superpixels
 #      morphological_differences
-#      fractal_morphologies}
+#      fractal_morphologies
+#      morphological_differences_superpixels}
 # ===============================================
 
-filtration=background
+filtration=background #none OR background; background for MISO paper
+ps=96 #224 for MISO-2, 96 for MISO-1
+bs=36 #7 for MISO-2, 36 for MISO-1
+ne=10 #20 for MISO-2, 10 for MISO-1
+plab=seg # inherit for MISO paper, can also have seg for MIL
+
+# defaults
+dn=controls
+ldp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/train-"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-labeldict.obj"
+
+if [ ${plab} = "seg" ]; then
+    ldp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-seg_labels_TRAIN.obj"
+    echo $ldp
+fi
+
 # string format will be different outside of controls
 
-
 script=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/train.py
-ne=10
 hp=0.01
-bs=36
 cd=1
 nf=False
-dn=controls
 dlt=stored
-ps=96
 pload=random
-plab=inherit
 ploss=bce
 dp="/oak/stanford/groups/paragm/gautam/syncontrols/patches/1-channel/"${scenario}"/"${ps}"-patchsize/"${filtration}"-filtered/train"
 plp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/train-"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-patchlist.obj"
-ldp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/train-"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-labeldict.obj"
 mp=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/models/controls
 desc=${model_class}"-"${dlt}"_"${pload}"_loading-"${ps}"-label_"${plab}"-"${ploss}"_loss-on_"${dn}"-"${scenario}"-filtration_"${filtration}
 

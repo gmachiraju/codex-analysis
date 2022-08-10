@@ -43,11 +43,22 @@ Z95=1.96
 POOL = 7
 USE_GPU = True
 dtype = torch.float32
+
+# background-filtered
 problem_images_vggatt_md = ["reg72", "reg90"]
 problem_images_vgg19_gsp = ["reg70"]
 problem_images_vggatt_gsp = ["reg70", "reg66"]
 problem_images_vggatt_dsp = ["reg71", "reg85"]
 problem_images_vggatt_fm = ["reg79", "reg65", "reg77", "reg67", "reg59", "reg95", "reg93", "reg69", "reg41"]
+problem_images_vgg19_mdsp = ["S11100006-P235-subject212", "S11100006-P391-subject337", "S11100003-P235-subject212", "S11100003-P407-subject420", "S11100003-P083-subject315"]
+problem_images_vggatt_mdsp = ["S11100003-P311-subject320"]
+
+#none-filtered / background-preserved
+problem_images_vgg19_mdsp_none = ["S11100006-P235-subject212", "S11100003-P143-subject266", "S11100003-P203-subject302", "S11100006-P363-subject248", "S11100003-P367-subject259", "S11100006-P359-subject163",
+                                  "S11100003-P331-subject258", "S11100006-P491-subject297", "S11100003-P283-subject345", "S11100006-P423-subject322", "S11100003-P263-subject279", "S11100006-P391-subject337",
+                                  "S11100006-P127-subject222", "S11100006-P451-subject239", "S11100003-P127-subject222", "S11100003-P235-subject212", "S11100003-P407-subject420", "S11100003-P083-subject315"]
+problem_images_vggatt_mdsp_none = ["S11100003-P411-subject410"]
+problem_images_vggatt_fm_none = ["reg64", "reg16"]
 
 
 def compute_saliency_maps(X, y, model, model_class, channel_dim=1):
@@ -106,7 +117,7 @@ def compute_attention_maps(X, y, model, model_class, channel_dim=1):
     if model_class == "VGG_att":
         [_, c1, c2, c3] = model.forward(X)
     else: #VGG19 and VGG19_bn
-        print("Error: non-attention model")
+        print("Warning: Skipping attention maps -- non-attention model")
         return None
     if channel_dim == 1:
         # we use 2nd layer of attention for before max-pooling model
@@ -280,6 +291,7 @@ def dice(im1, im2, empty_score=1.0, beta2=1):
     # https://github.com/qubvel/segmentation_models/blob/master/segmentation_models/base/functional.py
     im1 = np.asarray(im1).astype(np.bool)
     im2 = np.asarray(im2).astype(np.bool)
+    # print(im1, im2)
 
     if im1.shape != im2.shape:
         raise ValueError("Shape mismatch: im1 and im2 must have the same shape.")
@@ -335,6 +347,7 @@ def sensitivity(im1, im2):
     # adapted from: https://github.com/Issam28/Brain-tumor-segmentation/blob/master/evaluation_metrics.py
     im1 = np.asarray(im1).astype(int)
     im2 = np.asarray(im2).astype(int)
+    # print(im1, im2)
 
     if im1.shape != im2.shape:
         raise ValueError("Shape mismatch: im1 and im2 must have the same shape.")
@@ -687,7 +700,7 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
     modes = ["dice", "jaccard", "overlap", "sensitivity", "specificty", "difference", "scagnostics_cos", "mae", "f-measure", "s-measure", "e-measure", "ssim"]
     analysis = ["ppm_confidence", "ppm_values", "ssm", "sam"]
 
-    if scenario not in ["extreme_value_pixels", "distribution_shifted_pixels", "morphological_differences", "extreme_value_superpixels", "guilty_superpixels", "fractal_morphologies"]:
+    if scenario not in ["extreme_value_pixels", "distribution_shifted_pixels", "morphological_differences", "extreme_value_superpixels", "guilty_superpixels", "fractal_morphologies", "morphological_differences_superpixels"]:
         print("Error: please input a supported scenario")
         exit()
 
@@ -730,7 +743,15 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
 
             for i, regi in enumerate(ppm_targets.keys()):                
                 img_list = os.listdir(reference_path)
-                img_match = [x for x in img_list if x.startswith(regi+"-")][0]
+
+                if "subject" in regi: # hard code for pathology controls
+                    regi_underscore = "_".join(regi.split("-")) 
+                    print(regi_underscore)
+                else:
+                    regi_underscore = regi
+
+                img_match = [x for x in img_list if regi_underscore in x][0]
+                # img_match = [x for x in img_list if x.startswith(regi+"-")][0]
                 print(img_match)
                 lab = label_dict[regi]
 
@@ -752,10 +773,14 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
                         b = np.where((gt < 0.5) & (gt >= 0), gt, 0)
                     elif scenario == "guilty_superpixels":
                         b = np.where(gt > 0, gt, 0) 
+                    elif scenario == "morphological_differences_superpixels":
+                        b = np.where(gt > 0, gt, 0) 
                     else:
                         b = np.where(gt > 0.5, gt, 0) 
                 elif lab == 1:
                     if scenario == "guilty_superpixels":
+                        b = np.where(gt > 0, gt, 0) 
+                    elif scenario == "morphological_differences_superpixels":
                         b = np.where(gt > 0, gt, 0) 
                     else:
                         b = np.where(gt > 0.5, gt, 0)
@@ -774,14 +799,25 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
 
                 if example_1 == img_match: 
 
-                    fig.text(0.45, 0.79, "Image: " + img_match.split("-")[0] + "-" + img_match.split("-")[1] , va='center', weight="bold")
+                    if "regi" in img_match:
+                        fig.text(0.45, 0.79, "Image: " + img_match.split("-")[0] + "-" + img_match.split("-")[1] , va='center', weight="bold")
+                    elif "subject" in img_match:
+                        fig.text(0.45, 0.79, "Image: " + img_match.split("_")[2] , va='center', weight="bold")
 
                     mask = np.load(reference_path + "/" + example_1)
-                    axs[0,0].imshow(mask[:,:,0], cmap="gray")
-                    axs[0,0].set_title("Class-1\ntest image")
-                    mask = np.load(reference_path + "/" + example_0)
-                    axs[0,1].imshow(mask[:,:,0], cmap="gray")
-                    axs[0,1].set_title("Corresponding class-0\ntest image")
+                    
+                    if "regi" in img_match:
+                        axs[0,0].imshow(mask[:,:,0], cmap="gray")
+                        axs[0,0].set_title("Class-1\ntest image")
+                        mask = np.load(reference_path + "/" + example_0)
+                        axs[0,1].imshow(mask[:,:,0], cmap="gray")
+                        axs[0,1].set_title("Corresponding class-0\ntest image")
+                    elif "subject" in img_match:
+                        axs[0,0].imshow(mask[:,:], cmap="gray")
+                        axs[0,0].set_title("Class-1\ntest image")
+                        mask = np.load(reference_path + "/" + example_0)
+                        axs[0,1].imshow(mask[:,:], cmap="gray")
+                        axs[0,1].set_title("Corresponding class-0\ntest image")
 
                     axs[2,1].imshow(a, cmap="viridis")
                     axs[2,1].set_title("PCM")
@@ -817,7 +853,8 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
             else:
                 all_scores.append("Average test "+an+"-mae (CI) = "+str('%.3f'%avg_score_mae)+" ("+str('%.3f'%ci_mae)+")")
                 all_scores.append("Average test "+an+"-ssim (CI) = "+str('%.3f'%avg_score_ssim)+" ("+str('%.3f'%ci_ssim)+")")
-                
+        
+            print("done with PCM")
         #------------------------
         # PPM, SSM, SAM analyses
         #------------------------
@@ -839,7 +876,16 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
             for i, regi in enumerate(ppm_targets.keys()):
 
                 img_list = os.listdir(reference_path)
-                img_match = [x for x in img_list if x.startswith(regi+"-")][0]
+
+                if "subject" in regi: # hard code for pathology controls
+                    regi_underscore = "_".join(regi.split("-")) 
+                    print(regi_underscore)
+                else:
+                    regi_underscore = regi
+
+                # img_match = [x for x in img_list if x.startswith(regi+"-")][0]
+                img_match = [x for x in img_list if regi_underscore in x][0]
+
                 lab = label_dict[regi]
                 print("\t", i, regi, "label=", lab)
 
@@ -880,6 +926,9 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
                         b = np.array(all_guilty, dtype=int)
 
                         guilty_patches += b.sum() 
+                    elif scenario == "morphological_differences_superpixels":
+                        # b = np.where(gt > 0.175, 1, 0) 
+                        b = np.where(gt > 0, 1, 0) 
                     else:
                         b = np.where(gt > 0.5, 1, 0)
 
@@ -897,6 +946,8 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
                     # calc statistics
                     #----------------      
                     for mode in modes:
+                        print("ssm/sam", mode)
+
                         if sal_visited == False:
                             metrics_dict[mode] = []
 
@@ -905,23 +956,35 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
                         else:
                             a = a_copy # reset
 
-                        if reduce_flag == "manual" and mode == "scagnostics_cos":
-                            if scenario == "morphological_differences" and model_name == "VGG_att" and regi in problem_images_vggatt_md:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "guilty_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_gsp:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "guilty_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_gsp:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "distribution_shifted_pixels" and model_name == "VGG_att" and regi in problem_images_vggatt_dsp:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "fractal_morphologies" and model_name == "VGG_att" and regi in problem_images_vggatt_fm:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-   
+                        if filter_status == "background":
+                            if reduce_flag == "manual" and mode == "scagnostics_cos":
+                                if scenario == "morphological_differences" and model_name == "VGG_att" and regi in problem_images_vggatt_md:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "morphological_differences_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_mdsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "guilty_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_gsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "guilty_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_gsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "distribution_shifted_pixels" and model_name == "VGG_att" and regi in problem_images_vggatt_dsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "fractal_morphologies" and model_name == "VGG_att" and regi in problem_images_vggatt_fm:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                        elif filter_status == "none":
+                            if reduce_flag == "manual" and mode =="scagnostics_cos":
+                                if scenario == "morphological_differences_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_mdsp_none:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "fractal_morphologies" and model_name == "VGG_att" and regi in problem_images_vggatt_fm_none:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+
                         pred = map_eval(a, b, mode, reduce_flag=reduce_flag, y=lab)
                         metrics_dict[mode].append(pred)
 
@@ -988,54 +1051,102 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
                     
                     #averages so they need tolerance
                     gt = ppmgt_dict[regi] # -1=bg, [0,1]=fg
-                    if i < 5:
-                        print("raw gt:", gt)
+                    # if i < 5:
+                    #     print("raw gt:", gt)
 
                     if lab == 0:
                         if scenario == "extreme_value_pixels" or scenario == "distribution_shifted_pixels" or scenario == "extreme_value_superpixels":
                             b = np.where((gt < 0.5) & (gt >= 0), 1, 0)
                         elif scenario == "guilty_superpixels":
                             b = np.where(gt > 0, 1, 0) 
+                        elif scenario == "morphological_differences_superpixels":
+                            b = np.where(gt > 0, 1, 0) 
                         else:
                             b = np.where(gt > 0.5, 1, 0)
                     elif lab == 1:
                         if scenario == "guilty_superpixels":
                             b = np.where(gt > 0, 1, 0)
+                        elif scenario == "morphological_differences_superpixels":
+                            # b = np.where(gt > 0.175, 1, 0) 
+                            b = np.where(gt > 0, 1, 0) 
                         else:
                             b = np.where(gt > 0.5, 1, 0)
 
-                    if i < 5:
-                        print("preview of maps")
-                        print("ppm:", a)
-                        print("num votes:", a.sum())
-                        print("gt:", b)
-                        print("num gt:", b.sum())
+                    # if i < 5:
+                    #     print("preview of maps")
+                    #     print("ppm:", a)
+                    #     print("num votes:", a.sum())
+                    #     print("gt:", b)
+                    #     print("num gt:", b.sum())
 
 
                     # calc statistics
                     #----------------
+                    print(regi)
+                    pre0_skip_flag = False
+                    # if filter_status == "background":
+                    #     if reduce_flag == "manual" and scenario == "morphological_differences_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_mdsp:
+                    #         print("skipping image", regi, "due to known complexity issues")
+                    #         continue
+                    #     if reduce_flag == "manual" and scenario == "morphological_differences_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_mdsp:
+                    #         print("skipping image", regi, "due to known complexity issues")
+                    #         continue
+                    # elif filter_status == "none":
+                    #     if reduce_flag == "manual" and scenario == "morphological_differences_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_mdsp_none:
+                    #         print("skipping image", regi, "due to known complexity issues")
+                    #         if i == 0:
+                    #             pre0_skip_flag = True
+                    #         continue
+                    #     if reduce_flag == "manual" and scenario == "morphological_differences_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_mdsp_none:
+                    #         print("skipping image", regi, "due to known complexity issues")
+                    #         if i == 0:
+                    #             pre0_skip_flag = True
+                    #         continue
+
                     for mode in modes:
+                        print("ppm",mode)
+
                         if mode == "s-measure" or mode == "ssim":
                             continue
-                        if i == 0:
+                        if i == 0 or pre0_skip_flag == True:
                             metrics_dict[mode] = []
 
-                        if reduce_flag == "manual" and mode == "scagnostics_cos":
-                            if scenario == "morphological_differences" and model_name == "VGG_att" and regi in problem_images_vggatt_md:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "guilty_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_gsp:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "guilty_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_gsp:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "distribution_shifted_pixels" and model_name == "VGG_att" and regi in problem_images_vggatt_dsp:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
-                            elif scenario == "fractal_morphologies" and model_name == "VGG_att" and regi in problem_images_vggatt_fm:
-                                print("skipping image", regi, "due to known scagnostics complexity issues")
-                                continue
+                        if filter_status == "background":
+                            if reduce_flag == "manual" and mode == "scagnostics_cos":
+                                if scenario == "morphological_differences" and model_name == "VGG_att" and regi in problem_images_vggatt_md:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "guilty_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_gsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "guilty_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_gsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "distribution_shifted_pixels" and model_name == "VGG_att" and regi in problem_images_vggatt_dsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "fractal_morphologies" and model_name == "VGG_att" and regi in problem_images_vggatt_fm:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "morphological_differences_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_mdsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+                                elif scenario == "morphological_differences_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_mdsp:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    continue
+
+                        elif filter_status == "none":
+                            if reduce_flag == "manual" and mode == "scagnostics_cos":
+                                if scenario == "morphological_differences_superpixels" and model_name == "VGG19" and regi in problem_images_vgg19_mdsp_none:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    if i == 0:
+                                        pre0_skip_flag = True
+                                    continue
+                                elif scenario == "morphological_differences_superpixels" and model_name == "VGG_att" and regi in problem_images_vggatt_mdsp_none:
+                                    print("skipping image", regi, "due to known scagnostics complexity issues")
+                                    if i == 0:
+                                        pre0_skip_flag = True
+                                    continue
 
                         pred = map_eval(a, b, mode, reduce_flag=reduce_flag, y=lab)
                         metrics_dict[mode].append(pred)
@@ -1066,6 +1177,7 @@ def map_accuracy(scenario, specs, example_1, example_0, label_dict, att_dict, sa
             # final stats calculations
             #-------------------------
             for mode in modes:
+
                 if scenario == "guilty_superpixels" and (an == "sam"):
                     print("Approximate guilty region #patches:", guilty_patches)
 
@@ -1200,6 +1312,8 @@ def create_prediction_reportcard(scenario, specs, folder, label_path, img_path, 
         for s in compare_scores[i]:
             print(s)
         print()
+
+    return [rocs_p, prcs_p, aps_p, all_accs, all_aurocs, all_auprcs, all_aps, compare_scores]
 
 
 def main():

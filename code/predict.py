@@ -381,8 +381,18 @@ def image_accuracies(ppm_targets, ppm_probs, reference_path, label_dict, print_f
         num_correct = 0
         
         for i, regi in enumerate(ppm_targets.keys()):
+            if "subject" in regi: # hard code for pathology controls
+                regi_underscore = "_".join(regi.split("-")) 
+                print(regi_underscore)
+            else:
+                regi_underscore = regi
+
             img_list = os.listdir(reference_path)
-            img_match = [x for x in img_list if x.startswith(regi)][0]
+            img_match = [x for x in img_list if regi_underscore in x][0]
+
+            # old code
+            #---------
+            # img_match = [x for x in img_list if x.startswith(regi)][0]
 
             # if "guilty" in reference_path:
             #     if "guilty" in img_match:
@@ -394,6 +404,8 @@ def image_accuracies(ppm_targets, ppm_probs, reference_path, label_dict, print_f
             #         lab = 0
             #     elif "hot" in img_match:
             #         lab = 1 
+
+   
             lab = label_dict[regi]
 
             pred, prob = image_classify(ppm_targets[regi], ppm_probs[regi], mode)

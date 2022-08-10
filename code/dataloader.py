@@ -5,7 +5,7 @@ import random
 import glob
 from torch.utils import data
 import torch
-# import h5py
+import h5py
 from pathlib import Path
 import pdb
 from sklearn.preprocessing import KBinsDiscretizer
@@ -15,8 +15,11 @@ from preprocess import axis_rotate, axis_reflect, normalize
 
 
 class LabelDiscretizer(object):
+    """
+    Used for proxy prediction. In multiplexed images, channel can be used as target to train a model. 
+    """
     def __init__(self, path, sample_size=1000, normalize=False):
-        # note: data already normalized in preprocessing, exept if mode = dspt
+        # note: data likely already normalized in preprocessing
         self.normalize = normalize
         self.path = path
         self.sample_size = sample_size
@@ -26,7 +29,6 @@ class LabelDiscretizer(object):
         random.shuffle(self.files)     
 
     def fit_bins(self, channel=50):
-        # print(self.files[:self.sample_size]) yes, random assortment achieved
         meds = []
         for i in range(self.sample_size):
             f = self.files[i]
@@ -44,10 +46,9 @@ class LabelDiscretizer(object):
 
 
 class DataLoader(object):
-    # This data loader can work on-the-fly (otf) or using pre-stored patches (stored)
-
-    # future: support random and blocked patch loading
-
+    """
+    This dataloader can work on-the-fly (otf) or using pre-stored patches (stored)
+    """
     def __init__(self, args):        
         self.args = args
         self.mode = args.dataloader_type
@@ -55,19 +56,23 @@ class DataLoader(object):
         if self.mode == "otf":
             self.files = utils.deserialize(args.patchlist_path)
             self.images = os.listdir(args.data_path)
+        
         elif self.mode == "stored":
-            # pdb.set_trace()
             print("data path:", args.data_path)
             self.files = os.listdir(args.data_path) 
-            # print(self.files) 
-            # print(type(args.data_path))
-            
             if "]" not in self.files[0]: # only patches have this in their names
                 print("Detecting stored data loading. Check to make sure data_path is the patch directory. Exiting...")
                 exit()
             self.images = None
+
+        elif self.mode == "hdf5":
+            hf = h5py.File(args.data_path, 'r')
+            self.files = list(hf.keys())
+            self.images = None
+            self.retriever = hf
+
         else:
-            print("enter valid dataloader type")
+            print("Error: enter valid dataloader type")
             exit()
 
         np.random.seed(231)
@@ -81,6 +86,9 @@ class DataLoader(object):
 
 
     def __iter__(self):
+        """
+        Custom generator to retrieve batches
+        """
         i = 0
         while i < len(self.files):
             batch = []
@@ -88,9 +96,10 @@ class DataLoader(object):
             filenames = []
 
             for f in self.files[i:i+self.args.batch_size]:
+                
                 if self.mode == "otf":
                     try:
-                        # GET ALL INFO FROM patch name and slice into tiff/npy file
+                        # get all info from patch name and slice into tiff/npy file
                         pieces = f.split("_")
                         reg_id, patch = pieces[0], pieces[1]
                         coord, shift, aug =  pieces[2], pieces[3], pieces[4]
@@ -122,10 +131,18 @@ class DataLoader(object):
                         dat = np.load(self.args.data_path + "/" + f)
                     except:
                         continue
+
+                elif self.mode == "hdf5":
+                    try:
+                        dat = self.retriever[f]
+                    except:
+                        continue
+                    
                 else:
                     print("Error: valid data loader type not specified! Exiting!")
                     quit()
 
+                # get label
                 lab = self.get_label(f)
                 
                 if dat.shape == (self.args.channel_dim, self.args.patch_size, self.args.patch_size):
@@ -140,10 +157,15 @@ class DataLoader(object):
     
 
     def get_label(self, fname):
-        reg_id = fname.split("_")[0]
-        # print(self.args.label_dict)
+        """
+        Grab label for associated file "fname"
+            fname: string for filename being queried
+        """
+        if self.args.dataset_name == "cam":
+            pieces = fname.split("_")
+            reg_id = pieces[0] + "_" + pieces[1] 
+        else:
+            reg_id = fname.split("_")[0]
         label = self.args.label_dict[reg_id]
         return label
-
-
 

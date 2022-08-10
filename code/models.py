@@ -11,9 +11,38 @@ from torchsummary import summary
 import numpy as np
 import pdb
 import copy
+import gc
 
+from typing import Union, List, Dict, Any, cast
 # import train
 # from train import PrintLayer, Flatten
+
+
+
+__all__ = [
+    "VGG",
+    "vgg11",
+    "vgg11_bn",
+    "vgg13",
+    "vgg13_bn",
+    "vgg16",
+    "vgg16_bn",
+    "vgg19_bn",
+    "vgg19",
+]
+
+
+model_urls = {
+    "vgg11": "https://download.pytorch.org/models/vgg11-8a719046.pth",
+    "vgg13": "https://download.pytorch.org/models/vgg13-19584684.pth",
+    "vgg16": "https://download.pytorch.org/models/vgg16-397923af.pth",
+    "vgg19": "https://download.pytorch.org/models/vgg19-dcbb9e9d.pth",
+    "vgg11_bn": "https://download.pytorch.org/models/vgg11_bn-6002323d.pth",
+    "vgg13_bn": "https://download.pytorch.org/models/vgg13_bn-abd245e5.pth",
+    "vgg16_bn": "https://download.pytorch.org/models/vgg16_bn-6c64b313.pth",
+    "vgg19_bn": "https://download.pytorch.org/models/vgg19_bn-c79401a0.pth",
+}
+
 
 def flatten(x):
     N = x.shape[0] # read in N, C, H, W, where N is batch size
@@ -30,8 +59,33 @@ class PrintLayer(nn.Module):
         print(x.shape)
         return x
 
-# Architectures
-#---------------
+
+
+#new loss: adapted from: https://discuss.pytorch.org/t/how-to-learn-the-weights-between-two-losses/39681
+class MultiTaskLoss(nn.Module):
+	def __init__(self, model, eta, combo_flag):
+		super(MultiTaskLoss, self).__init__()
+		self.combo_flag = combo_flag
+		self.model = model
+		self.eta = nn.Parameter(torch.tensor(eta, dtype=dtype))
+
+	def forward(self, inputs, y, loss2):
+		scores = self.model(inputs)
+		loss1 = F.cross_entropy(scores, y, reduction="mean")
+		losses = [loss1, loss2]
+
+		if self.combo_flag == "uncertainty":
+			total_l = torch.tensor(losses) * torch.exp(-self.eta) + self.eta
+			total_loss = total_l.sum()
+		elif self.combo_flag == "learnAlpha":
+			total_loss = torch.tensor(loss1, dtype=dtype) + (self.eta * torch.tensor(loss2, dtype=dtype))
+
+		return scores, losses, total_loss
+
+
+# Non-neural torch modules
+#--------------------------
+
 class VGGEmbedder(torch.nn.Module):
     def __init__(self, trained_model, att_flag=False):
         super(VGGEmbedder, self).__init__()
@@ -58,6 +112,36 @@ class LogisticRegression(nn.Module):
         out = torch.sigmoid(self.linear(x)) # self.sigmoid(self.linear(x)) 
         return out
 
+
+#-------------------SE block-------------------------
+# from: https://www.kaggle.com/c/tgs-salt-identification-challenge/discussion/65939
+class Seq_Ex_Block(nn.Module):
+    def __init__(self, in_ch, r):
+        super(Seq_Ex_Block, self).__init__()
+        self.se = nn.Sequential(
+            GlobalAvgPool(),
+            nn.Linear(in_ch, in_ch//r),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_ch//r, in_ch),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        se_weight = self.se(x).unsqueeze(-1).unsqueeze(-1)
+        #print(f'x:{x.sum()}, x_se:{x.mul(se_weight).sum()}')
+        return x.mul(se_weight)
+
+
+class GlobalAvgPool(nn.Module):
+    def __init__(self):
+        super(GlobalAvgPool, self).__init__()
+    def forward(self, x):
+        return x.view(*(x.shape[:-2]),-1).mean(-1)
+#-----------------------------------------------------
+
+
+
+# Architectures
+#---------------
 
 
 class VGG19():
@@ -203,15 +287,181 @@ class VGG19():
 
         
 class stdVGG19():
-	def __init__(self):
+	def __init__(self, bn_flag=False):
 
 		# VGG19 portion, pre-pooling
-		self.arch = torchvision.models.vgg19(pretrained=True)
+		if bn_flag == False:
+			self.arch = torchvision.models.vgg19() # pretrained=False
+		else:
+			self.arch = torchvision.models.vgg19_bn()
 
 		self.arch.classifier[6] = nn.Linear(4096, 2) # assigning last layer to only 2 outputs
 
 		for param in self.arch.parameters():
 			param.requires_grad = True
+
+
+# model from: https://github.com/pytorch/vision/blob/main/torchvision/models/vgg.py
+class VGG(nn.Module):
+    def __init__(
+        self, features: nn.Module, num_classes: int = 1000, init_weights: bool = True, dropout: float = 0.5
+    ) -> None:
+        super().__init__()
+        # _log_api_usage_once(self)
+        self.features = features
+        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.ReLU(True),
+            nn.Dropout(p=dropout),
+            nn.Linear(4096, 4096),
+            nn.ReLU(True),
+            nn.Dropout(p=dropout),
+            nn.Linear(4096, num_classes),
+        )
+        if init_weights:
+            for m in self.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+                elif isinstance(m, nn.BatchNorm2d):
+                    nn.init.constant_(m.weight, 1)
+                    nn.init.constant_(m.bias, 0)
+                elif isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, 0, 0.01)
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
+        return x
+
+
+def make_layers(cfg: List[Union[str, int]], batch_norm: bool = False) -> nn.Sequential:
+    layers: List[nn.Module] = []
+    in_channels = 1  # used to be 3
+    for v in cfg:
+        if v == "M":
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+        else:
+            v = cast(int, v)
+            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            if batch_norm:
+                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+            else:
+                layers += [conv2d, nn.ReLU(inplace=True)]
+            in_channels = v
+    return nn.Sequential(*layers)
+
+
+cfgs: Dict[str, List[Union[str, int]]] = {
+    "A": [64, "M", 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
+    "B": [64, 64, "M", 128, 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
+    "D": [64, 64, "M", 128, 128, "M", 256, 256, 256, "M", 512, 512, 512, "M", 512, 512, 512, "M"],
+    "E": [64, 64, "M", 128, 128, "M", 256, 256, 256, 256, "M", 512, 512, 512, 512, "M", 512, 512, 512, 512, "M"],
+}
+
+
+def _vgg(arch: str, cfg: str, batch_norm: bool, pretrained: bool, progress: bool, **kwargs: Any) -> VGG:
+    if pretrained:
+        kwargs["init_weights"] = False
+    model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm), **kwargs)
+    if pretrained:
+        state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
+        model.load_state_dict(state_dict)
+    return model
+
+
+def vgg11(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 11-layer model (configuration "A") from
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg11", "A", False, pretrained, progress, **kwargs)
+
+
+def vgg11_bn(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 11-layer model (configuration "A") with batch normalization
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg11_bn", "A", True, pretrained, progress, **kwargs)
+
+
+def vgg13(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 13-layer model (configuration "B")
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg13", "B", False, pretrained, progress, **kwargs)
+
+
+def vgg13_bn(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 13-layer model (configuration "B") with batch normalization
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg13_bn", "B", True, pretrained, progress, **kwargs)
+
+
+def vgg16(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 16-layer model (configuration "D")
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg16", "D", False, pretrained, progress, **kwargs)
+
+
+def vgg16_bn(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 16-layer model (configuration "D") with batch normalization
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg16_bn", "D", True, pretrained, progress, **kwargs)
+
+
+def vgg19(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 19-layer model (configuration "E")
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg19", "E", False, pretrained, progress, **kwargs)
+
+
+def vgg19_bn(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+    r"""VGG 19-layer model (configuration 'E') with batch normalization
+    `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
+    The required minimum input size of the model is 32x32.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _vgg("vgg19_bn", "E", True, pretrained, progress, **kwargs)
+
 
 
 
