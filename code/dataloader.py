@@ -44,7 +44,7 @@ class LabelDiscretizer(object):
 
 
 
-class DataLoader(object):
+class DataLoaderCustom(object):
     """
     This dataloader can work on-the-fly (otf) or using pre-stored patches (stored)
     """

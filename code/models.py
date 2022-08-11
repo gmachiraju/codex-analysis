@@ -6,18 +6,17 @@ import torch.utils.model_zoo as model_zoo
 import torchvision
 import torchvision.models as models
 from torchvision import transforms as trn
-# from torchsummary import summary
+from torchsummary import summary
+import pytorch_lightning as pl
 
 import numpy as np
 import pdb
 import copy
 import gc
-
 from typing import Union, List, Dict, Any, cast
-# import train
-# from train import PrintLayer, Flatten
 
-
+LEARN_RATE_IMG = 8e-2 #5e-2 #1e-2
+dtype=torch.float32
 
 __all__ = [
     "VGG",
@@ -30,7 +29,6 @@ __all__ = [
     "vgg19_bn",
     "vgg19",
 ]
-
 
 model_urls = {
     "vgg11": "https://download.pytorch.org/models/vgg11-8a719046.pth",
@@ -87,15 +85,25 @@ class MultiTaskLoss(nn.Module):
 #--------------------------
 
 class VGGEmbedder(torch.nn.Module):
-    def __init__(self, trained_model, att_flag=False):
-        super(VGGEmbedder, self).__init__()
-        # pdb.set_trace()
-        # print(att_flag)
-        if att_flag == False:
-            self.embedder = trained_model[:-3].eval()
-        else:
-            self.embedder = torch.nn.Sequential(*(list(trained_model.children())[:-1])).eval()
-        # self.embedder = nn.Sequential(*list(trained_model.classifier.children())[:-3]).eval() 
+	def __init__(self, trained_model, args, att_flag=False):
+		super(VGGEmbedder, self).__init__()
+		# if att_flag == True:
+		#     self.embedder = trained_model[:-3].eval()
+		if args.model_class in ["VGG19", "VGG19_bn"]:
+			if args.patch_size == 224:
+				self.embedder = trained_model.eval()
+				#torch.nn.Sequential(*(list(trained_model.children()))).eval()
+				# self.embedder = torch.nn.Sequential(*(list(trained_model.children())[:-1])).eval()
+
+		# self.embedder = nn.Sequential(*list(trained_model.classifier.children())[:-3]).eval() 
+	def forward(self, x):
+	    return self.embedder(x)
+
+
+class ViTEmbedder(torch.nn.Module):
+    def __init__(self, trained_model, args):
+        super(ViTEmbedder, self).__init__()
+        self.embedder = trained_model[:-3].eval()
 
     def forward(self, x):
         return self.embedder(x)
@@ -113,7 +121,47 @@ class LogisticRegression(nn.Module):
         return out
 
 
-#-------------------SE block-------------------------
+# https://www.richard-stanton.com/2021/06/19/pytorch-elasticnet.html
+class ElasticLinear(pl.LightningModule):
+    def __init__(self, loss_fn, n_inputs: int = 1, learning_rate=LEARN_RATE_IMG, l1_lambda=0.05, l2_lambda=0.05):
+        super().__init__()
+        # learning_rate used to be 0.05
+        self.learning_rate = learning_rate
+        self.loss_fn = loss_fn
+        self.l1_lambda = l1_lambda
+        self.l2_lambda = l2_lambda
+        self.output_layer = torch.nn.Linear(n_inputs, 1)
+        self.train_log = []
+
+    def forward(self, x):
+        outputs = self.output_layer(x)
+        return outputs
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(), lr=self.learning_rate)
+        return optimizer
+
+    def l1_reg(self):
+        l1_norm = self.output_layer.weight.abs().sum()
+
+        return self.l1_lambda * l1_norm
+
+    def l2_reg(self):
+        l2_norm = self.output_layer.weight.pow(2).sum()
+        
+        return self.l2_lambda * l2_norm
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        y_hat = self(x)
+        loss = self.loss_fn(y_hat, y) + self.l1_reg() + self.l2_reg()
+        
+        self.log("loss", loss)
+        self.train_log.append(loss.detach().numpy())
+        return loss
+
+
+
 # from: https://www.kaggle.com/c/tgs-salt-identification-challenge/discussion/65939
 class Seq_Ex_Block(nn.Module):
     def __init__(self, in_ch, r):
@@ -136,13 +184,17 @@ class GlobalAvgPool(nn.Module):
         super(GlobalAvgPool, self).__init__()
     def forward(self, x):
         return x.view(*(x.shape[:-2]),-1).mean(-1)
-#-----------------------------------------------------
 
+
+class GlobalMaxPool(nn.Module):
+    def __init__(self):
+        super(GlobalMaxPool, self).__init__()
+    def forward(self, x):
+        return x.view(*(x.shape[:-2]),-1).max(-1)
 
 
 # Architectures
 #---------------
-
 
 class VGG19():
 	# same structure as vgg19 model, modified inputs and outputs
@@ -197,7 +249,7 @@ class VGG19():
 			    
 			    Flatten(),
 			    
-			    nn.Linear(in_features= 4608, out_features=4096, bias=True),
+			    nn.Linear(in_features=4608, out_features=4096, bias=True),
 			    nn.ReLU(inplace = True),
 			    nn.Dropout(p=0.5),
 			    
@@ -273,7 +325,7 @@ class VGG19():
 			    
 			    Flatten(),
 			    
-			    nn.Linear(in_features= 4608, out_features=4096, bias=True),
+			    nn.Linear(in_features=4608, out_features=4096, bias=True),
 			    nn.ReLU(inplace = True),
 			    nn.Dropout(p=0.5),
 			    
