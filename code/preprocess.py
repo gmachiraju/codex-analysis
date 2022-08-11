@@ -5,7 +5,6 @@ import tifffile as tiff
 import numpy as np
 import pandas as pd
 import pdb
-# import cv2
 # from skimage.filters import gabor_kernel
 # from skimage.feature import ORB, match_descriptors
 from scipy import ndimage as ndi
@@ -17,18 +16,19 @@ from sklearn.manifold import TSNE
 import gc # grabage collect for memory issues
 from PIL import Image
 
-import utils
-from utils import labels_dict, reg_dict, ctrl_dict, str2bool
 import argparse
-
 import h5py
 import torch
 from torchvision import transforms
-import torchstain
-import cv2
+# import torchstain
+
+# import cv2
+
+import utils
+from utils import labels_dict, reg_dict, ctrl_dict, str2bool
+# import stain_norm
 
 normalize_refpath = "/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/ref_imgs/target.png"
-# import stain_norm
 
 # constants
 random.seed(100)

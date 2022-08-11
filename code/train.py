@@ -21,7 +21,7 @@ import torch.utils.model_zoo as model_zoo
 import torchvision
 import torchvision.models
 from torchvision import transforms as trn
-from torchsummary import summary
+# from torchsummary import summary
 
 # from torchviz import make_dot
 from sklearn.decomposition import PCA
@@ -582,26 +582,31 @@ def train_classifier(model, device, optimizer, args, save_embeds_flag=True):
 
 	Returns: Nothing, but prints model accuracies during training.
 	"""
+	if save_embeds_flag == True:
+		if args.cache_path == None:
+			print("Error: Missing cache path for embeddings. Please enter a path to save your cache.")
+
 	train_losses = []
-	model = model.to(device=device) # move the model parameters to CPU/GPU
+	model = model.to(device=device)
 
 	att_flag = False
 	if args.model_class == "VGG_att":
 		att_flag = True
-	print("training", args.model_class)
+	print("Now training:", args.model_class)
 
 	if args.model_class.startswith("VGG") == True:
-		if args.model_class != "VGG_att": # this errors for some reason
-			summary(model, input_size=(args.channel_dim, args.patch_size, args.patch_size)) # print model
-		train_loader = DataLoader(args)
-	else:
-		print("choose valid model type! See help docstring!")
-		exit()
+		if args.model_class != "VGG_att": # this errors 
+			# summary(model, input_size=(args.channel_dim, args.patch_size, args.patch_size)) # print model
+			pass
+	
+	train_loader = DataLoader(args)
 
-	model.train()  # put model to training mode
+	# place model in training mode
+	model.train()
 
 	# files loaded differently per model class
 	for e in range(args.num_epochs):
+		
 		if save_embeds_flag == True:
 			embed_dict = defaultdict(list)
 
@@ -614,21 +619,12 @@ def train_classifier(model, device, optimizer, args, save_embeds_flag=True):
 
 			if args.model_class == "VGG_att":
 				[scores, c1, c2, c3] = model(x)
-			else: #VGG19 and VGG19_bn
+			elif args.model_class in ["VGG19", "VGG19_bn"]:
 				scores = model(x)
 
 			train_loss = F.cross_entropy(scores, y)
-
-			# Zero out all of the gradients for the variables which the optimizer
-			# will update.
 			optimizer.zero_grad()
-
-			# This is the backwards pass: compute the gradient of the loss with
-			# respect to each  parameter of the model.
 			train_loss.backward()
-
-			# Actually update the parameters of the model using the gradients
-			# computed by the backwards pass.
 			optimizer.step()
 
 			if t % print_every == 0:
@@ -640,22 +636,20 @@ def train_classifier(model, device, optimizer, args, save_embeds_flag=True):
 			train_losses.append(train_loss.item())
 			gc.collect()
 
-			if save_embeds_flag == True:
+			# save embeddings every 4 epochs for standard classifiers
+			if save_embeds_flag == True and ((e+1) % 4 == 0):
 				embed_dict = store_embeds(embed_dict, fxy, x, model, att_flag)
-
-				# save embeddings per epoch // overwrite each epoch's embeddings for now
-				serialize(embed_dict, utils.code_dir + args.model_class + "-epochs" + str(args.num_epochs) + "-max_embeddings_train.obj")
-			#move away from utils.code_dir and instead ask for a cache_dir in args
-
-		# save model per epoch --> skipping for now
+				serialize(embed_dict, args.cache_path + "/" + args.string_details + "-epoch" + str(e) + "-embeddings_train.obj")
+				
+		# save model per epoch
 		torch.save(model, args.model_path + "/" + args.string_details + "_epoch%s.pt" % e)
-		# could also check val acc every epoch
+		
+		# Future: check val acc every epoch
 
 		# cache the losses every epoch
 		serialize(train_losses, args.model_path + "/" + args.string_details + "_trainloss.obj")
 		fig = plt.plot(train_losses, c="blue", label="train loss")
 		plt.savefig(args.model_path + "/"  + args.string_details + "_trainloss.png", bbox_inches="tight")
-
 
 	# full model save
 	torch.save(model, args.model_path + "/" + args.string_details + "_full.pt")
@@ -696,6 +690,7 @@ def main():
 	parser.add_argument('--patchlist_path', default=None, type=str, help="Patch list path. This is a cached result of the preprocess.py script.")
 	parser.add_argument('--labeldict_path', default=None, type=str, help="Label dictionary path. This is a cached result of the preprocess.py script.")
 	parser.add_argument('--model_path', default=None, type=str, help="Where you'd like to save the model outputs.")
+	parser.add_argument('--cache_path', default=None, type=str, help="Where you'd like to save the model outputs.")
 
 	args = parser.parse_args()
 
@@ -785,6 +780,7 @@ def main():
 
 		elif args.model_class == "VGG_att":
 			model = AttnVGG_before(args.channel_dim, args.patch_size, num_classes)
+
 
 	# OPTIMIZER INSTANTIATION
 	#=========================

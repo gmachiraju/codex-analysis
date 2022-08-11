@@ -6,7 +6,7 @@ import torch.utils.model_zoo as model_zoo
 import torchvision
 import torchvision.models as models
 from torchvision import transforms as trn
-from torchsummary import summary
+# from torchsummary import summary
 
 import numpy as np
 import pdb
