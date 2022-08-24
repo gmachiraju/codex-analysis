@@ -22,6 +22,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torchvision
 
+from pytorch_grad_cam import GradCAM
+from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+
 from sklearn.preprocessing import scale
 import skimage
 import imutils
@@ -128,6 +131,22 @@ def compute_attention_maps(X, y, model, model_class, channel_dim=1):
     else:
         return None
 
+def compute_gradcam_maps(X, y, model, model_class, channel_dim=1):
+    if channel_dim <= 3:
+        if model_class.startswith("VGG19"):
+            pdb.set_trace()
+            target_layers = [model.layer4[-1]]
+        elif model_class == "VGG_att":
+            pdb.set_trace()
+        elif model_class =="ViT"
+            pdb.set_trace()
+
+        cam = GradCAM(model=model, target_layers=target_layers, use_cuda=True)
+        targets = [ClassifierOutputTarget(1)]
+        grayscale_cam = cam(input_tensor=X, targets=targets)
+        return grayscale_cam
+    else: 
+        return None
 
 def show_explanation_maps(X, y, model, args, plot_flag=False):
     # Convert X and y from numpy arrays to Torch Tensors
@@ -140,6 +159,7 @@ def show_explanation_maps(X, y, model, args, plot_flag=False):
     # Compute saliency maps for images in X
     saliency = compute_saliency_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim)
     attention = compute_attention_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim)
+    gradcam = compute_gradcam_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim):
 
     # Convert the saliency map from Torch Tensor to numpy array and show images
     # and saliency maps together of whole batch.
@@ -160,7 +180,7 @@ def show_explanation_maps(X, y, model, args, plot_flag=False):
         plt.show()
         return None
     else:
-        return saliency, attention
+        return saliency, attention, gradcam
     
 
 def stitch_expmaps(saliency_loader_stitch, model_pt, args, regs_normal, regs_50, imgdim_dict, pred_dict):

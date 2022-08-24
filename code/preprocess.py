@@ -5,28 +5,35 @@ import tifffile as tiff
 import numpy as np
 import pandas as pd
 import pdb
-# from skimage.filters import gabor_kernel
-# from skimage.feature import ORB, match_descriptors
+
 from scipy import ndimage as ndi
 from collections import defaultdict
 import random
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
-import gc # grabage collect for memory issues
+import gc 
 from PIL import Image
 
 import argparse
 import h5py
-import torch
-from torchvision import transforms
-# import torchstain
+# import torch
+# from torchvision import transforms
+import cv2
 
-# import cv2
+# only toggle for python3.6
+#==========================
+# import openslide
+
+# import stain_norm
+# import torchstain
+# from skimage.filters import gabor_kernel
+# from skimage.feature import ORB, match_descriptors
 
 import utils
-from utils import labels_dict, reg_dict, ctrl_dict, str2bool
-# import stain_norm
+from utils import labels_dict, reg_dict, ctrl_dict, str2bool, deserialize
+
+
 
 normalize_refpath = "/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/ref_imgs/target.png"
 
@@ -343,13 +350,16 @@ def fit_normalizer(norm_type="macenko"):
         target = cv2.imread(normalize_refpath)
         target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
 
-        transform_fn = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Lambda(lambda x: x*255)
-        ])
+        # -- please install torchstain and then uncomment the below lines 
+        # transform_fn = transforms.Compose([
+        #     transforms.ToTensor(),
+        #     transforms.Lambda(lambda x: x*255)
+        # ])
 
-        normalize_fn = torchstain.MacenkoNormalizer(backend='torch')
-        normalize_fn.fit(transform_fn(target))
+        # normalize_fn = torchstain.MacenkoNormalizer(backend='torch')
+        # normalize_fn.fit(transform_fn(target))
+        print("torchstain package not imported. Exiting...")
+        exit()
 
     elif norm_type == "vahadane":
         normalize_fn = stain_norm.Normalizer()
@@ -396,7 +406,7 @@ def normalize(im, dataset_name, transform_fn=None, normalize_fn=None):
 
 
 
-def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05, thresh_tile=None):
+def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05, thresh_tile=None, bg_remove_flag=False):
     """
     Toss out tiles with >=80% low intensity pixels
     OR toss out middle values..... you set the filtering function!
@@ -409,9 +419,16 @@ def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05, thresh_tile=None):
 
     elif dataset_name == "cam":
         summed = np.sum(im, 0)
-        # pdb.set_trace()
-        if np.mean(summed > q) > 0.5 and np.mean(thresh_tile) < 0.6: # 0.75,0.5
-            return True
+        if bg_remove_flag == True: # some are background-removed images!
+            if np.mean(summed) == 0: # "black"/blank region in val set
+                return True
+            elif np.std(summed) == 0: # black or white tiles
+                return True
+            elif np.any(summed == 0):
+                return True
+        else:
+            if np.mean(summed > q) > 0.5 and np.mean(thresh_tile) < 0.6: # 0.75,0.5
+                return True
         return False
 
     elif dataset_name == "controls":
@@ -419,7 +436,6 @@ def toss_blank_tile(im, q, dataset_name="u54codex", tol=0.05, thresh_tile=None):
         if (mean_val < q+tol and mean_val > q-tol) or (np.isnan(mean_val)):
             # print("mean=", np.mean(im), "--> tossing b/c is NaN or mean was too close to", q)
             return True
-        # print("mean=", np.mean(im))
         return False
 
 
@@ -482,11 +498,19 @@ def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_
     if args.dataset_name == "cam":
         reshaped_im = im.reshape(imgheight, imgwidth, channel)
 
-    # repeating data examples - jsut for controls
+    # repeating data examples - just for controls
     if args.dataset_name == "controls":
         d_flag = True
     else:
         d_flag = False
+
+    # pdb.set_trace()
+    summed = np.sum(im, 0)
+    if np.any(summed == 0):
+        detected_zero_flag = True
+        print("detected 0-pixels...")
+    else:
+        detected_zero_flag = False
 
 
     # iterate over patches
@@ -545,7 +569,7 @@ def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_
                 continue
 
         if args.filtration_type == "background": # if not, we keep all patches including noisy background
-            if toss_blank_tile(tile, q_low, args.dataset_name, thresh_tile=thresh_tile): # blank patch
+            if toss_blank_tile(tile, q_low, args.dataset_name, thresh_tile=thresh_tile, bg_remove_flag=bool(args.bg_remove_flag*detected_zero_flag)): # blank patch
                 patch_tossed_i += 1
                 patch_tossed += 1
                 del tile
@@ -646,7 +670,6 @@ def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_
         del tile
         # print(saved_flag)
 
-
     # make HDF5 dataset
     if args.hdf5_flag == True:
         hf.close()  # close the hdf5 file
@@ -691,7 +714,7 @@ def otsu_thresh(im):
     return 1-th
 
 
-def patchify(args):
+def patchify(args, level=3):
     # creates a list of all patches per image if prepatch_flag=True
     # else: creates and saves patches 
 
@@ -742,8 +765,8 @@ def patchify(args):
     if args.dataset_name == "controls" or args.dataset_name == "cam":
         splitlab_dict = {}
 
-    if args.dataset_name == "cam":
-        transform_fn, normalize_fn = fit_normalizer(norm_type="macenko")
+    # if args.dataset_name == "cam":
+    #     transform_fn, normalize_fn = fit_normalizer(norm_type="macenko")
 
 
     #################
@@ -758,8 +781,8 @@ def patchify(args):
             if not filename.endswith(".tif"):
                 continue
 
-        elif args.dataset_name == "controls" or args.dataset_name == "cam":
-            if not filename.endswith(".npy"):
+        elif (args.dataset_name == "controls") or (args.dataset_name == "cam"):
+            if (not filename.endswith(".npy")) and (not filename.endswith(".tif")):
                 continue
 
         # Read File
@@ -771,14 +794,25 @@ def patchify(args):
             im = im.reshape(cycle * channel, imgwidth, imgheight)
 
         elif args.dataset_name == "controls" or args.dataset_name == "cam":
-            im = np.load(os.path.join(args.data_dir, filename))
+            if filename.endswith(".npy"):
+                im = np.load(os.path.join(args.data_dir, filename))
+
+            elif filename.endswith(".tif"):
+                im_pyramid = openslide.OpenSlide(os.path.join(args.data_dir, filename))
+                desired_downsample = im_pyramid.level_downsamples[level]
+                desired_dims = im_pyramid.level_dimensions[level]
+                print(desired_downsample, desired_dims)
+                rgba_img = im_pyramid.read_region((0,0), level, desired_dims)
+                del im_pyramid
+                rgba_arr = np.asarray(rgba_img)
+                rgb_arr = cv2.cvtColor(rgba_arr, cv2.COLOR_RGBA2RGB)
+                im = np.asarray(rgb_arr)
 
             # debugging
             # print("your image's shape is:", im.shape)
             # np.save(args.save_dir + '/' + "tester-img-loaded.npy", np.asarray(im, dtype=np.uint8))
             # print(im[12096:12320, 2464:2688, :])
             # pdb.set_trace()
-
             try:
                 imgwidth, imgheight, channel = im.shape
             except ValueError: # dimension mismatch
@@ -807,10 +841,15 @@ def patchify(args):
         if args.dataset_name == "cam":
             im_id = filename.split(".")[0]  # "label_{idx}", e.g. normal_001
             idx = im_id.split("_")[1]  # {idx}
-            if "normal" in im_id:
-                splitlab_dict[im_id] = 0
-            else: # tumor
-                splitlab_dict[im_id] = 1
+            if "patient" in im_id: # validation from cam17
+                splitlab_dict = deserialize(args.label_dict)
+
+            else: # training/testing
+                if "normal" in im_id:
+                    splitlab_dict[im_id] = 0
+                else: # tumor
+                    splitlab_dict[im_id] = 1
+
 
         elif args.dataset_name == "u54codex":
             im_folder = filename.split(".")[0]  # "reg{idx}_montage"
@@ -1136,6 +1175,8 @@ def main():
     parser.add_argument('--control_groundtruth_flag', default=False, type=str2bool, help="Do you want to create ground truths? Only works if dataset name = controls.")
     parser.add_argument('--overwrite_gt_flag', default=False, type=str2bool, help="Do you want to create NEW ground truths?")
 
+    parser.add_argument('--bg_remove_flag', default=False, type=str2bool, help="Is the background removed and replaced with 0-values? Defaults to False.")
+    parser.add_argument('--label_dict', default=None, type=str, help="Optional: if you have a label dictionary, give the path here.")
     parser.add_argument('--hdf5_flag', default=False, type=str2bool, help="Do you want to store the patches as HDF5?")
 
     args = parser.parse_args()
@@ -1164,7 +1205,7 @@ def main():
     mil_runs = ["cam", "guilty_superpixels"]
 
     if args.control_groundtruth_flag == False and args.study_arm == "test" and args.dataset_name == "cam":
-        print("OOPS...Not implemented! Sorry. Please implement.")
+        print("Ground truths are provided already. Exiting..")
 
 
     if args.control_groundtruth_flag == True and args.study_arm == "test" and args.dataset_name == "controls":

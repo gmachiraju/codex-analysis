@@ -1,14 +1,15 @@
 #!/bin/bash
-#SBATCH --time=50:00:00
-#SBATCH --mem=24G
-#SBATCH --output=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train.out
-#SBATCH --error=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train.err
+#SBATCH --time=40:00:00
+#SBATCH --mem=20G
+#SBATCH --output=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train-sgn.out
+#SBATCH --error=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/runs/train-sgn.err
 #SBATCH --partition=andrewg
 #SBATCH --gres gpu:1
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=gmachi@stanford.edu
-#SBATCH --job-name=vit-cam
- 
+#SBATCH --job-name=bsgn-vgg19_bn-cam
+
+module purge
 module load devel
 module load python/3.9.0
 source /home/users/gmachi/anaconda3/etc/profile.d/conda.sh
@@ -26,8 +27,11 @@ ps=224
 # gamified learning params
 save_embeds_flag=True
 gamified_flag=True
-blindfolded_flag=True
+backprop_level=blindfolded
+# options are none, blindfolded, full
+# none is the same as regularization term
 pool_type=max
+# mean not yet efficiently implemented
 # ===============================================
 
 filtration=background #none OR background; background for MISO paper
@@ -53,5 +57,5 @@ desc=${model_class}"-"${dlt}"_"${pload}"_loading-"${ps}"-label_"${plab}"-"${plos
 
 script=/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/train.py
 
-python ${script} --description ${desc} --model_class ${model_class} --num_epochs ${ne} --hyperparameters ${hp} --batch_size ${bs} --channel_dim ${cd} --normalize_flag ${nf} --dataset_name ${dn} --dataloader_type ${dlt} --patch_size ${ps} --patch_loading ${pload} --patch_labeling ${plab} --patch_loss ${ploss} --data_path ${dp} --patchlist_path ${plp} --labeldict_path ${ldp} --model_path ${mp} --cache_path ${cp} --save_embeds_flag ${save_embeds_flag} --gamified_flag ${gamified_flag} --blindfolded_flag ${blindfolded_flag} --pool_type ${pool_type}
+python ${script} --description ${desc} --model_class ${model_class} --num_epochs ${ne} --hyperparameters ${hp} --batch_size ${bs} --channel_dim ${cd} --normalize_flag ${nf} --dataset_name ${dn} --dataloader_type ${dlt} --patch_size ${ps} --patch_loading ${pload} --patch_labeling ${plab} --patch_loss ${ploss} --data_path ${dp} --patchlist_path ${plp} --labeldict_path ${ldp} --model_path ${mp} --cache_path ${cp} --save_embeds_flag ${save_embeds_flag} --gamified_flag ${gamified_flag} --backprop_level ${backprop_level} --pool_type ${pool_type}
 

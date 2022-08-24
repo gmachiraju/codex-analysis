@@ -35,7 +35,8 @@ plab=seg
 
 # defaults
 dn=controls
-ldp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/train-"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-labeldict.obj"
+ldp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/test-"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-labeldict.obj"
+# used to be train-"${dn}"
 
 if [ ${plab} = "seg" ]; then
     ldp="/home/groups/plevriti/gautam/codex_analysis/codex-analysis/code/outputs/"${dn}"-"${scenario}"-"${ps}"-"${filtration}"-seg_labels_TEST.obj"

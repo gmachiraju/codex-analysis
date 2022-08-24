@@ -19,3 +19,6 @@
 ASAP-2.1-py310-Ubuntu2004.deb
 /code/path-imgs/
 /code/ref_imgs/
+.ipynb_checkpoints/
+/code/wandb/
+lightning_logs/

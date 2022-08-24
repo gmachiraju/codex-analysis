@@ -21,7 +21,7 @@ from scipy.signal import medfilt
 
 import utils
 from utils import serialize, deserialize
-from dataloader import DataLoader
+from dataloader import DataLoaderCustom
 from train import Flatten, check_patch_accuracy, str2bool
 
 from preprocess import get_imgdims, inflate_2by2
@@ -436,26 +436,40 @@ def image_accuracies(ppm_targets, ppm_probs, reference_path, label_dict, print_f
 
 # Methods to call with shell:
 #------------------------------
-def image_patch_summary(pred_dict, img_path, HW):
+def image_patch_summary(pred_dict, img_path, HW, args):
     # get all files/regs in val set + get their instantiated sizes
     # this is only telling us the max dims of the patches seen
 
     imgdim_dict = get_imgdims(img_path, HW)
-
     regs_normal, regs_50 = {}, {}
     patch_names = list(pred_dict.keys())
+
+    # check on type of patch naming convention we have
+    if "patient" in patch_names[0] and args.dataset_name == "cam":
+        multi_sample_flag = True
+    else:
+        multi_sample_flag = False
     
     for k, pn in enumerate(patch_names):
+        if multi_sample_flag == False:
+            contents = pn.split("_")
+            regi = contents[0]
+            patchnum = int(contents[1].split("patch")[1])
+            coords = contents[2]
+            shift = contents[3]
+            aug = contents[4].split(".npy")[0]            
+        else:
+            contents = pn.split("_")
+            regi = contents[0] + "_" + contents[1] + "_" + contents[2] + "_" + contents[3]
+            patchnum = int(contents[4].split("patch")[1])
+            coords = contents[5]
+            shift = contents[6]
+            aug = contents[7]
 
-        contents = pn.split("_")
-        regi = contents[0]
-        patchnum = int(contents[1].split("patch")[1])
-        coords = contents[2]
-        shift = contents[3]
-        aug = contents[4].split(".npy")[0]
+
         if aug != "noaug":
             continue # only interested in non-augmented patches
-
+        
         ii = int(coords.split("-")[0].split("coords")[1])
         jj = int(coords.split("-")[1])
         
@@ -491,10 +505,17 @@ def image_patch_summary(pred_dict, img_path, HW):
     return regs_normal, regs_50, imgdim_dict
 
     
-def image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, labeldict_path, model_path, save_path):
+def image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, labeldict_path, model_path, save_path, args):
+    # check on type of patch naming convention we have
+    patch_names = list(pred_dict.keys())
+    if "patient" in patch_names[0] and args.dataset_name == "cam":
+        multi_sample_flag = True
+    else:
+        multi_sample_flag = False
 
     target_arrs, count_arrs, prob_arrs = {}, {}, {}
     
+    # instantiate the maps
     for regi in imgdim_dict.keys():
         [rows, cols] = imgdim_dict[regi]
 
@@ -505,18 +526,24 @@ def image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, labeldict
         target_arrs[regi] = target_arr
         count_arrs[regi] = count_arr
         prob_arrs[regi] = prob_arr       
-    
-    
-    # build heatmap
+
+    # build heatmaps
     for pn, ppl in pred_dict.items():
-        # print(pn, ppl)
-        
-        contents = pn.split("_")
-        regi = contents[0]
-        patchnum = int(contents[1].split("patch")[1])
-        coords = contents[2]
-        shift = contents[3]
-        aug = contents[4].split(".npy")[0]
+        if multi_sample_flag == False:
+            contents = pn.split("_")
+            regi = contents[0]
+            patchnum = int(contents[1].split("patch")[1])
+            coords = contents[2]
+            shift = contents[3]
+            aug = contents[4].split(".npy")[0]
+        else:
+            contents = pn.split("_")
+            regi = contents[0] + "_" + contents[1] + "_" + contents[2] + "_" + contents[3]
+            patchnum = int(contents[4].split("patch")[1])
+            coords = contents[5]
+            shift = contents[6]
+            aug = contents[7]
+
         if aug != "noaug":
             continue # only interested in non-augmented patches; used as a sanity check
         
@@ -609,7 +636,6 @@ def image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, labeldict
     flavor_text = model_path.split("/")[-1].split(".")[0]
     serialize(ppm_prob_dict, save_path + "/" + flavor_text + "_PPMprobs.obj")
     serialize(ppm_target_dict, save_path + "/" + flavor_text + "_PPM.obj")
-
     return
 
 
@@ -644,8 +670,10 @@ def main():
     parser.add_argument('--model_class', default=None, type=str, help='Select one of: VGG19/VGG19_bn/VGG_att.')
     parser.add_argument('--model_choice', default=None, type=str, help='Select one of: final/manual/best_val (not for controls)')
     parser.add_argument('--model_path', default=None, type=str, help="Where you'd like to save the model outputs.")
+   
+    # may only be needed for getting guide/shallow classifiers in the pipeline
+    parser.add_argument('--game_description', default="patchcnn", type=str, help="Descriptor for gamified learning. Default is patchcnn, i.e. no game played.")
 
-    parser.add_argument('--hyperparameters', default=0.01, type=float, help="Denotes hyperparameters for custom losses. Only used for Uncertainty Loss. Default value is alpha=0.1, where a higer value indicates more focus on img-level predictions")
     parser.add_argument('--batch_size', default=36, type=int, help="Batch size. dDfault is 36.")
     parser.add_argument('--channel_dim', default=1, type=int, help="Channel dimension. Default is 1.")
     parser.add_argument('--normalize_flag', default=False, type=str2bool, help="T/F if patches need normalization. Default is False.")
@@ -737,29 +765,33 @@ def main():
         #         print("Error: Oops, not yet implemented! Exiting early")
         #         exit()
 
-        pass # need to edit this
+        print("Detecting a path with models to choose from. Not yet implemented. Please specify specific model!")
+        exit() 
+        # need to edit this
+
 
     else:
         print("Error: Unsure of input path.... Exiting")
         exit()
 
-
     setattr(args, "model_name", model_name)
-
-    num_correct, num_samples, cum_loss, losses, pred_dict = eval_1epoch(args)
-    stats_tup = (num_correct, num_samples, cum_loss, losses)
     flavor_text = args.model_path.split("/")[-1].split(".")[0]
 
+    # get some evaluation stats
+    num_correct, num_samples, cum_loss, losses, pred_dict = eval_1epoch(args)
+    stats_tup = (num_correct, num_samples, cum_loss, losses)
+    print("Here are some quick performance stats!")
+    print(stats_tup)
     serialize(stats_tup, args.save_path + "/" + flavor_text + "_stats.obj")
     serialize(pred_dict, args.save_path + "/" + flavor_text + "_preddict.obj")
 
     # make PPM dictionaries for plotting later
-    regs_normal, regs_50, imgdim_dict = image_patch_summary(pred_dict, args.reference_path, args.patch_size)
+    regs_normal, regs_50, imgdim_dict = image_patch_summary(pred_dict, args.reference_path, args.patch_size, args)
     serialize(regs_normal, args.save_path + "/" + flavor_text + "_regs_normal.obj")
     serialize(regs_50, args.save_path + "/" + flavor_text + "_regs_50.obj")
     # serialize(imgdim_dict, args.save_path + "/" + "imgdim_dict.obj")
     
-    image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, args.labeldict_path, args.model_path, args.save_path)
+    image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, args.labeldict_path, args.model_path, args.save_path, args)
     print("FINISHED PREDICTIONS")
 
 

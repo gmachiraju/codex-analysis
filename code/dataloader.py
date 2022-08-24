@@ -135,6 +135,7 @@ class DataLoaderCustom(object):
                     try:
                         dat = self.retriever[f]
                     except:
+                        print("unable to retrieve")
                         continue
                     
                 else:
@@ -161,10 +162,16 @@ class DataLoaderCustom(object):
             fname: string for filename being queried
         """
         if self.args.dataset_name == "cam":
-            pieces = fname.split("_")
-            reg_id = pieces[0] + "_" + pieces[1] 
+            if "patient" in fname: #validation
+                pieces = fname.split("_")
+                reg_id = pieces[0] + "_" + pieces[1] + "_" + pieces[2] + "_" + pieces[3] + ".tif"
+            else: # train or test
+                pieces = fname.split("_")
+                reg_id = pieces[0] + "_" + pieces[1] 
         else:
             reg_id = fname.split("_")[0]
+
+
         label = self.args.label_dict[reg_id]
         return label
 

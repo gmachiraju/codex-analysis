@@ -25,13 +25,15 @@ import torchvision
 import torchvision.models
 from torchvision import transforms as trn
 
+import wandb
+
 # personal imports
 from dataloader import DataLoaderCustom
 import utils
 from utils import labels_dict, count_files, unique_files, set_splits
 from utils import train_dir, val_dir, test_dir
 from utils import serialize, deserialize, str2bool
-from models import VGG19, VGGEmbedder, AttnVGG_before, vgg19, MultiTaskLoss, ElasticLinear
+from models import VGG19, VGGEmbedder, AttnVGG_before, vgg19, vgg19_bn, MultiTaskLoss, ElasticLinear
 
 
 # Constants/defaults
@@ -123,7 +125,14 @@ def pool_embeds(embeds, pool_flag="max"):
 
 def check_mb_accuracy(scores, ys):
 	_, preds = scores.max(1)
-	probs = F.softmax(scores, dim=1) # used to slice like this: [:,1] # but let's instead take both
+	probs = F.softmax(scores, dim=1) 
+	# used to slice like this: [:,1] 
+	# but let's instead take both
+	
+	# print(probs)
+	# print(ys)
+	# pdb.set_trace()
+
 	num_correct = (preds == ys).sum()
 	num_samples = preds.size(0)
 	return preds, probs, num_correct, num_samples
@@ -172,7 +181,7 @@ def check_patch_accuracy(model, args, batch_flag=False):
 	model.eval()  # set model to evaluation mode
 
 	if args.model_class.startswith("VGG") == True:
-		loader = DataLoader(args)
+		loader = DataLoaderCustom(args)
 	else:
 		print("choose valid model type! See help docstring!")
 		exit()
@@ -235,6 +244,7 @@ def check_patch_accuracy(model, args, batch_flag=False):
 
 # Training routines
 #------------------
+
 def store_embeds(embed_dict, fxy, x, trained_model, args, att_flag=False):
 	"""
 	Stores embeddings from a backbone model
@@ -244,7 +254,7 @@ def store_embeds(embed_dict, fxy, x, trained_model, args, att_flag=False):
 	- x: hidden vector input into shallow learner
 	- trained_model: pytorch model of weak embedder
 	"""
-	if args.blindfolded_flag == True:
+	if args.backprop_level != "full":
 		x = x.detach().clone() 
 	
 	if args.model_class.startswith("VGG"):
@@ -252,26 +262,46 @@ def store_embeds(embed_dict, fxy, x, trained_model, args, att_flag=False):
 	elif args.model_class == "ViT":
 		embedder = ViTEmbedder()
 
+	# register hooks
+	if args.backprop_level != "none":
+		activation = {}
+		def getActivation(name):
+		  # the hook signature
+		  def hook(model, input, output):
+		    activation[name] = output.detach()
+		  return hook
+
+		h_linear = embedder.embedder.classifier[0].register_forward_hook(getActivation('linear'))
+
+	# pdb.set_trace()
+
 	z = embedder(x)
-	if args.blindfolded_flag == True:
+	if args.backprop_level != "none":
+		h_linear.remove()
+		z = activation["linear"]
+	if args.backprop_level != "full":
 		z = z.detach().clone()
  	# ^ from: https://stackoverflow.com/questions/48274929/pytorch-runtimeerror-trying-to-backward-through-the-graph-a-second-time-but
 
-	for i, f in enumerate(fxy):
-		if args.dataset_name == "u54codex":
-			im_folder = f.split(".")[0]  # "reg{idx}_montage"
-			im_id = im_folder.split("_")[0]  # "reg{idx}""
-			idx = im_id.split("reg")[1]  # {idx}
-		elif args.dataset_name == "cam":
-			pieces = f.split("_")
-			idx = pieces[0] + "_" + pieces[1]
-		
-		embed_dict[idx].append(z[0, :])
-		z = z[1:, :] # delete 0th row to match with f
-		embed_dict[idx] = [pool_embeds(embed_dict[idx], args.pool_type)]
+	if args.pool_type == "max":
+		for i, f in enumerate(fxy):
+			if args.dataset_name == "u54codex":
+				im_folder = f.split(".")[0]  # "reg{idx}_montage"
+				im_id = im_folder.split("_")[0]  # "reg{idx}""
+				idx = im_id.split("reg")[1]  # {idx}
+			elif args.dataset_name == "cam":
+				pieces = f.split("_")
+				idx = pieces[0] + "_" + pieces[1]
+			
+			embed_dict[idx].append(z[0, :])
+			z = z[1:, :] # delete 0th row to match with f
+			embed_dict[idx] = [pool_embeds(embed_dict[idx], args.pool_type)]
+	else:
+		print("Pooling type specified is not yet implemented!")
+		exit()
 
 	gc.collect()
-	if args.blindfolded_flag == True:
+	if args.backprop_level != "full":
 		torch.cuda.empty_cache()
 
 	return embed_dict
@@ -282,14 +312,36 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 	Trains the gamified learning runs
 	Inputs:
 	- model_patch: A PyTorch Module of the model to train.
-	- optimizer: An Optimizer object we will use to train the model
+	- optimizer: An Optimizer object we will use to train the model (image-level)
 	- epochs: (Optional) A Python integer giving the number of epochs to train for
 	Returns: Nothing, but prints model accuracies during training.
 	"""
+
+	# Logging with Weights & Biases
+	#-------------------------------
+	if args.backprop_level == "none":
+		game_type = "r" # regularizer
+	elif args.backprop_level == "blindfolded":
+		game_type = "b"
+	elif args.backprop_level == "full":
+		game_type = "f"
+	else:
+		print("backprop_level not supported")
+
+	experiment = game_type + "SGN-" + args.model_class + "-" + args.dataset_name
+	wandb.init(project=experiment, entity="gamified-learning")
+	wandb.config = {
+	  "learning_rate": LEARN_RATE,
+	  "epochs": args.num_epochs,
+	  "batch_size": args.batch_size
+	}
+
+	# set-up
+	#--------
 	train_losses_patch, train_losses_img = [], []
 	train_losses = []
-	graph_flag = args.blindfolded_flag
-	game_descriptors = "gamify-" + taskcombo_flag + "-blindfolded" + str(args.blindfolded_flag) + "-" + args.pool_type + "_pooling-"
+	graph_flag = args.backprop_level
+	game_descriptors = "gamify-" + taskcombo_flag + "-backprop" + str(args.backprop_level) + "-" + args.pool_type + "_pooling-"
 	
 	# override optimizer to make sure MTL loss is loaded in
 	mtl = MultiTaskLoss(model=model_patch, eta=[2.0, 1.0], combo_flag=taskcombo_flag)
@@ -313,13 +365,29 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 		elif args.model_class == "VGG_att":
 			att_flag = True
 		embedder = VGGEmbedder(model_patch, args, att_flag=att_flag)
+		# if backprop is none, we get an actually embedder
+		# else, we get the model itself back and need to apply hooks
 
 	elif args.model_class == "ViT":
 		 # embedder = ViTEmbedder()
 		 print("ViT embedder not yet fully implemented")
 		 exit()
 
-	z = embedder(x.float())
+	# gathering embeddings
+	if args.backprop_level == "none":
+		z = embedder(x.float())
+	else: # register hooks instead
+		activation = {}
+		def getActivation(name):
+		  # the hook signature
+		  def hook(model, input, output):
+		    activation[name] = output.detach()
+		  return hook
+		h_linear = embedder.embedder.classifier[0].register_forward_hook(getActivation('linear'))
+		z = embedder(x.float()) # forward pass
+		h_linear.remove()
+		z = activation["linear"]
+
 	hidden_size = z.shape[1]
 
 	# define model_img: LASSO classifier
@@ -329,13 +397,11 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 	model_img = model_img.to(device=device) 
 	model_patch.train()  
 	model_img.train()  
-
 	print("Finishing model configuration! Onto training...")
 
 	# Main training loop
 	#--------------------
 	for e in range(args.num_epochs):
-
 		print("="*30 + "\n", "Beginning epoch", e, "\n" + "="*30)
 
 		# IMAGE-LEVEL
@@ -379,8 +445,8 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 		dataloader_train = DataLoader(dataset_train, batch_size=sample_size//10, shuffle=True)
 		trainer.fit(model_img, dataloader_train)
 		train_loss_img = trainer.logged_metrics['loss']
+		print("Image-level training loss:", train_loss_img)
 		train_losses_img.append(train_loss_img.item())
-
 
 		# PATCH-LEVEL
 		#=============
@@ -397,13 +463,19 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 			x = x.to(device=device, dtype=dtype)  # move to device, e.g. GPU
 			y = y.to(device=device, dtype=torch.long)
 
-			if graph_flag == True:
+			if graph_flag != "none":
 				scores, losses, train_loss = mtl(x, y, train_loss_img)
-			else:
+			else: 
+				# backprop_level=none ==> just regularization term after transfer learning
 				scores, losses, train_loss = mtl(x, y, train_loss_img.detach().clone())
 
+			# should always retain graph at this point b/c all necessary detachment has happened by now
 			optimizer.zero_grad()
-			train_loss.backward(retain_graph=graph_flag)
+			train_loss.backward(retain_graph=True)
+			# if graph_flag != "none":
+			# 	train_loss.backward(retain_graph=True)
+			# else:
+			#  	train_loss.backward(retain_graph=False)
 			optimizer.step()
 
 			if t % print_every == 0:
@@ -411,6 +483,7 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 				preds, probs, num_correct, num_samples = check_mb_accuracy(scores, y)
 				acc = float(num_correct) / num_samples
 				print('minibatch training accuracy: %.4f' % (acc * 100))
+				print("Uncertainty loss parameters (weights for losses):", mtl.eta)
 
 			train_losses_patch.append(train_loss.item())
 			train_losses.append(train_loss.item())
@@ -435,6 +508,11 @@ def train_tandem(model_patch, device, optimizer, args, save_embeds_flag=True):
 		serialize(train_losses_img, args.model_path + "/" + args.string_details + "_trainlossIMG.obj")
 		fig = plt.plot(train_losses_img, c="blue", label="Train loss for shallow image-level model")
 		plt.savefig(args.model_path + "/"  + args.string_details + "_trainlossIMG.png", bbox_inches="tight")
+
+		# more logging
+		wandb.log({"loss-image": train_loss_img,
+				   "loss-patch": train_loss})
+		# wandb.watch((model_img,model_patch,mtl))
 
 	# full model save
 	torch.save(model_patch, args.model_path + "/" + game_descriptors + args.string_details + "_EMBEDDER_full.pt")
@@ -473,7 +551,7 @@ def train_classifier(model, device, optimizer, args, save_embeds_flag=True):
 			# summary(model, input_size=(args.channel_dim, args.patch_size, args.patch_size)) # print model
 			pass
 	
-	train_loader = DataLoader(args)
+	train_loader = DataLoaderCustom(args)
 	model.train()
 
 	# files loaded differently per model class
@@ -546,7 +624,7 @@ def main():
 	# gamified learning specific args
 	parser.add_argument('--save_embeds_flag', default=False, type=str2bool, help="T/F if you want to save embeddings every 4 epochs. Defaults to F.")
 	parser.add_argument('--gamified_flag', default=False, type=str2bool, help="T/F if you are running gamified learning with the model_class specified and a shallow learner. Defaults to F.")
-	parser.add_argument('--blindfolded_flag', default=False, type=str2bool, help="T/F if you are running full info gamified learning. Defaults to F. Only relevant if gamified_flag = True.")
+	parser.add_argument('--backprop_level', default="blindfold", type=str, help="Level of cross-model learning in gamified learning setup. Options are none, blindfolded, full. Defaults to blindfold. Only relevant if gamified_flag = True.")
 	parser.add_argument('--pool_type', default="max", type=str, help="Type of pooling for gamified learning. Defaults to max. Only relevant if gamified_flag = True.")
 
 	# parameters for patches
@@ -646,7 +724,9 @@ def main():
 			if args.patch_size == 96:
 				model = VGG19(bn_flag=True).arch
 			elif args.patch_size == 224:
-				model = torchvision.models.vgg19_bn(weights=None) 
+				model = vgg19_bn(pretrained=False, in_channels=args.channel_dim)
+				# model = torchvision.models.vgg19_bn(weights=None) 
+
 
 		elif args.model_class == "VGG_att":
 			model = AttnVGG_before(args.channel_dim, args.patch_size, num_classes)
@@ -665,12 +745,18 @@ def main():
 	#==================
 	if args.model_class in supported_models and args.gamified_flag == False:
 		loss_history = train_classifier(model, device, optimizer, args) 
+	
 	elif args.model_class in supported_models and args.gamified_flag == True: 
 		print("="*60 + "\nInitiating backbone architecture for Gamified Learning!" + "\n" + "="*60)
+		if args.pool_type != "max":
+			print("Error: mean-pool and other pooling not efficiently implemented yet. Exiting...")
+			exit()	
 		loss_history, loss_history_img = train_tandem(model, device, optimizer, args, save_embeds_flag=True)
+	
 	else:
 		print("Error: Please choose a valid model to train")
 
 
 if __name__ == "__main__":
 	main()
+

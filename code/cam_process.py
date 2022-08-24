@@ -12,7 +12,8 @@ import skimage
 from skimage import measure
 
 from utils import serialize, deserialize, str2bool
-LV=3 # was 5
+LV=3 # was 5 earlier
+
 
 # Converting TIFs to NPYs
 #--------------------------
@@ -29,12 +30,13 @@ def get_imgdims(sample_id, data_path, level=LV):
     # height = int(dim[0] / desired_downsample) #* scale_percent / 100)
     # new_dim = (width, height)
     del img
+    print("desired downsample is:", desired_downsample)
 
-    return dim, desired_dims
+    return dim, desired_dims, desired_downsample
 
 
-def get_foreground_maps(sample_id, data_path, level=LV):
-    
+# def get_foreground_maps(sample_id, data_path, level=LV):
+#     pass
 
 
 def process_image(sample_id, data_path, save_path, level=LV):
@@ -62,11 +64,7 @@ def process_image(sample_id, data_path, save_path, level=LV):
     print("")
     
     
-def process_mask(sample_id, xml_path, data_path, save_path):
-    img_file = data_path + "/" + sample_id + ".tif"
-    xml_file = xml_path + "/" + sample_id + ".xml"
-    dim, new_dim = get_imgdims(sample_id, data_path)
-    
+def parse_xml(xml_file, reduction=None):
     save_list, ys, xs = [], [], []
     annot_count = 0
     with open(xml_file, 'r') as infile:
@@ -78,6 +76,8 @@ def process_mask(sample_id, xml_path, data_path, save_path):
             elif "<Coordinate Order=" in line:
                 xy = line.split(" ")[2:4]
                 xy = [float(xy[0].split("=")[1].strip('\"')), float(xy[1].split("=")[1].strip('\"'))]
+                if reduction:
+                    xy = [xy[0] // reduction, xy[1] // reduction]
                 x.append(xy[0]) 
                 y.append(xy[1])
                 annot.append(xy)
@@ -86,19 +86,95 @@ def process_mask(sample_id, xml_path, data_path, save_path):
                     save_list.append(annot)
                     xs.append(x)
                     ys.append(y)
+
+    return save_list, ys, xs
+
+
+def view_mask(sample_id, xml_path, data_path, save_path):
+    xml_file = xml_path + "/" + sample_id + ".xml"
+    img_file = data_path + "/" + sample_id + ".tif"
+    dim, new_dim, desired_downsample = get_imgdims(sample_id, data_path)
+    save_list, ys, xs = parse_xml(xml_file)
+    
+    for i in range(len(save_list)):
+        image = draw.polygon2mask(dim, np.stack((xs[i], ys[i]), axis=1))
+        y_min, y_max = int(np.round(np.min(ys[i])) - 100), int(np.round(np.max(ys[i])) + 100)
+        x_min, x_max = int(np.round(np.min(xs[i])) - 100), int(np.round(np.max(xs[i])) + 100)
+        zoom = image[x_min:x_max, y_min:y_max]
+        plt.figure()
+        plt.imshow(zoom, cmap="gray")
+
+
+
+def process_downsampled_mask(sample_id, xml_path, data_path, save_path):
+    """
+    For high-memory settings
+    """
+    img_file = data_path + "/" + sample_id + ".tif"
+    xml_file = xml_path + "/" + sample_id + ".xml"
+    dim, new_dim, desired_downsample = get_imgdims(sample_id, data_path)
+    save_list, ys, xs = parse_xml(xml_file)
     
     mask = np.zeros(new_dim)
-    print("mask shape is:", mask.shape)
+    print("original mask shape is:", dim)
+    print("mask shape is:", new_dim)
 
+    print("we've detected", len(save_list), "ROIs in this sample")
     for i in range(len(save_list)):
         image = draw.polygon2mask(dim, np.stack((xs[i], ys[i]), axis=1))
         image = cv2.resize(np.float32(image), new_dim, interpolation=cv2.INTER_AREA)
         mask += image
         del image
-            
+        print("finished ROI:", i)
+
+    plt.figure()
+    plt.imshow(mask, cmap="gray")    
     np.save(save_path + "/" + sample_id + ".npy", mask)
     del mask
+    print("Finished saving mask:", sample_id)
+    print("of shape:", mask.shape)
+    print("")
 
+
+def process_patch_mask(sample_id, xml_path, data_path, save_path, patch_size=224):
+    """
+    For low-memory settings with patches as the units of interest
+    """
+    print("starting on sample:", sample_id)
+    img_file = data_path + "/" + sample_id + ".tif"
+    xml_file = xml_path + "/" + sample_id + ".xml"
+    dim, new_dim, desired_downsample = get_imgdims(sample_id, data_path)
+    save_list, ys, xs = parse_xml(xml_file, reduction=desired_downsample)
+
+    patch_array_dim = [new_dim[0] // patch_size, new_dim[1] // patch_size]
+    mask = np.zeros(patch_array_dim)
+    print("original mask shape is:", dim)
+    print("mask shape is:", new_dim, "--> downsampled reduction of:", desired_downsample)
+    print("patch array shape is:", patch_array_dim, "--> block-/patched reduction of:", patch_size)
+    print("we've detected", len(save_list), "ROIs in this sample")
+
+    for i in range(len(save_list)):
+        image = draw.polygon2mask(new_dim, np.stack((xs[i], ys[i]), axis=1))
+        image = skimage.measure.block_reduce(image, block_size=(patch_size, patch_size), func=np.mean)
+        try:
+            mask += image
+        except ValueError: # still a missmatch
+            print("Detecting a mismatch in annotation and overall mask dimensions... adjusting")
+            print("image")
+            # assuming smaller iamge than mask by 1 row/col
+            if image.shape[0] > mask.shape[0]: # height
+                image = image[:-1, :]
+            if image.shape[1] > mask.shape[1]: # width
+                image = image[:, :-1]
+            mask += image
+            
+        del image
+        print("finished ROI:", i)
+
+    mask = mask > 0
+    plt.figure()
+    plt.imshow(mask, cmap="gray")    
+    np.save(save_path + "/" + sample_id + "_MASK.npy", mask)
     print("Finished saving mask:", sample_id)
     print("of shape:", mask.shape)
     print("")

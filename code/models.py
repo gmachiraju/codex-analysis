@@ -66,10 +66,18 @@ class MultiTaskLoss(nn.Module):
 		self.combo_flag = combo_flag
 		self.model = model
 		self.eta = nn.Parameter(torch.tensor(eta, dtype=dtype))
+		# self.args = args
+
+		# if args.patch_size == 224 and args.model_class == "VGG19_bn":
+		# 	pass
+		# else:
+		# 	self.loss = torch.nn.CrossEntropyLoss()
 
 	def forward(self, inputs, y, loss2):
 		scores = self.model(inputs)
+		# loss1 = F.binary_cross_entropy_with_logits(scores, y, reduction="mean")
 		loss1 = F.cross_entropy(scores, y, reduction="mean")
+		# loss1 = self.loss(scores, y, reduction=mean)
 		losses = [loss1, loss2]
 
 		if self.combo_flag == "uncertainty":
@@ -87,15 +95,34 @@ class MultiTaskLoss(nn.Module):
 class VGGEmbedder(torch.nn.Module):
 	def __init__(self, trained_model, args, att_flag=False):
 		super(VGGEmbedder, self).__init__()
-		# if att_flag == True:
-		#     self.embedder = trained_model[:-3].eval()
 		if args.model_class in ["VGG19", "VGG19_bn"]:
 			if args.patch_size == 224:
-				self.embedder = trained_model.eval()
-				#torch.nn.Sequential(*(list(trained_model.children()))).eval()
-				# self.embedder = torch.nn.Sequential(*(list(trained_model.children())[:-1])).eval()
+				if args.backprop_level == "none":
+					# pdb.set_trace()
+					# self.embedder = torch.nn.Sequential(*(list(trained_model.children())[:-1])).eval()
+					# self.embedder = torch.nn.Sequential(*(list(trained_model.children())[:-1])).eval()
+					# self.embedder = torch.nn.Sequential(*(list(trained_model.children())[:])).eval()
+					
+					# reassigning changes the model, copying is not beneficial to the optimization
+					clf = torch.nn.Sequential(trained_model.classifier[0])
+					copied_model = copy.deepcopy(trained_model)
+					copied_model.classifier = clf
+					self.embedder = copied_model.eval()					
+				elif args.backprop_level == "blindfolded": #  blindfolded backprop
+					# clf = torch.nn.Sequential(trained_model.classifier[0])
+					# trained_model.classifier = clf
+					# self.embedder = trained_model # keep gradient flow going
 
-		# self.embedder = nn.Sequential(*list(trained_model.classifier.children())[:-3]).eval() 
+					# use hooks!
+					# pdb.set_trace()
+					self.embedder = trained_model.eval()
+				else: # full
+					print("full backprop perserved")
+					self.embedder = trained_model
+		else:
+			print("Error: Have not yet implemented VGG-Att embeddings!")
+			exit()
+	
 	def forward(self, x):
 	    return self.embedder(x)
 
@@ -159,6 +186,7 @@ class ElasticLinear(pl.LightningModule):
         self.log("loss", loss)
         self.train_log.append(loss.detach().numpy())
         return loss
+
 
 
 
@@ -354,10 +382,9 @@ class stdVGG19():
 
 
 # model from: https://github.com/pytorch/vision/blob/main/torchvision/models/vgg.py
+# originally, num_classes=1000
 class VGG(nn.Module):
-    def __init__(
-        self, features: nn.Module, num_classes: int = 1000, init_weights: bool = True, dropout: float = 0.5
-    ) -> None:
+    def __init__(self, features: nn.Module, num_classes: int = 2, init_weights: bool = True, dropout: float = 0.5) -> None:
         super().__init__()
         # _log_api_usage_once(self)
         self.features = features
@@ -392,9 +419,9 @@ class VGG(nn.Module):
         return x
 
 
-def make_layers(cfg: List[Union[str, int]], batch_norm: bool = False) -> nn.Sequential:
+def make_layers(cfg: List[Union[str, int]], batch_norm: bool = False, in_channels: int = 3) -> nn.Sequential:
     layers: List[nn.Module] = []
-    in_channels = 1  # used to be 3
+    # in_channels = 3  # used to be 1, 3
     for v in cfg:
         if v == "M":
             layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
@@ -417,10 +444,10 @@ cfgs: Dict[str, List[Union[str, int]]] = {
 }
 
 
-def _vgg(arch: str, cfg: str, batch_norm: bool, pretrained: bool, progress: bool, **kwargs: Any) -> VGG:
+def _vgg(arch: str, cfg: str, batch_norm: bool, pretrained: bool, progress: bool, in_channels: int = 3, **kwargs: Any) -> VGG:
     if pretrained:
         kwargs["init_weights"] = False
-    model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm), **kwargs)
+    model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm, in_channels=in_channels), **kwargs)
     if pretrained:
         state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
         model.load_state_dict(state_dict)
@@ -504,7 +531,7 @@ def vgg19(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG
     return _vgg("vgg19", "E", False, pretrained, progress, **kwargs)
 
 
-def vgg19_bn(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> VGG:
+def vgg19_bn(pretrained: bool = False, progress: bool = True, in_channels: int = 3, **kwargs: Any) -> VGG:
     r"""VGG 19-layer model (configuration 'E') with batch normalization
     `"Very Deep Convolutional Networks For Large-Scale Image Recognition" <https://arxiv.org/pdf/1409.1556.pdf>`_.
     The required minimum input size of the model is 32x32.
@@ -512,7 +539,7 @@ def vgg19_bn(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> 
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _vgg("vgg19_bn", "E", True, pretrained, progress, **kwargs)
+    return _vgg("vgg19_bn", "E", True, pretrained, progress, in_channels, **kwargs)
 
 
 
