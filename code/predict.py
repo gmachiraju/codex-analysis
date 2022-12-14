@@ -387,7 +387,11 @@ def image_accuracies(ppm_targets, ppm_probs, reference_path, label_dict, print_f
             else:
                 regi_underscore = regi
 
-            img_list = os.listdir(reference_path)
+            if reference_path:
+                img_list = os.listdir(reference_path)
+            else:
+                img_list = label_dict.keys()
+
             img_match = [x for x in img_list if regi_underscore in x][0]
 
             # old code
@@ -439,8 +443,12 @@ def image_accuracies(ppm_targets, ppm_probs, reference_path, label_dict, print_f
 def image_patch_summary(pred_dict, img_path, HW, args):
     # get all files/regs in val set + get their instantiated sizes
     # this is only telling us the max dims of the patches seen
+    # pdb.set_trace()
+    if img_path is not None:
+        imgdim_dict = get_imgdims(img_path, HW)
+    else:
+        imgdim_dict = None
 
-    imgdim_dict = get_imgdims(img_path, HW)
     regs_normal, regs_50 = {}, {}
     patch_names = list(pred_dict.keys())
 
@@ -465,7 +473,6 @@ def image_patch_summary(pred_dict, img_path, HW, args):
             coords = contents[5]
             shift = contents[6]
             aug = contents[7]
-
 
         if aug != "noaug":
             continue # only interested in non-augmented patches
@@ -516,16 +523,33 @@ def image_patch_pred_map(regs_normal, regs_50, imgdim_dict, pred_dict, labeldict
     target_arrs, count_arrs, prob_arrs = {}, {}, {}
     
     # instantiate the maps
-    for regi in imgdim_dict.keys():
-        [rows, cols] = imgdim_dict[regi]
+    # pdb.set_trace()
+    if imgdim_dict is not None:
+        for regi in imgdim_dict.keys():
+            [rows, cols] = imgdim_dict[regi]
 
-        target_arr = [np.ones((rows+1, cols+1))*-1, np.ones((rows+1, cols+1))*-1]
-        count_arr = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
-        prob_arr =  [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+            target_arr = [np.ones((rows+1, cols+1))*-1, np.ones((rows+1, cols+1))*-1]
+            count_arr = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+            prob_arr =  [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
 
-        target_arrs[regi] = target_arr
-        count_arrs[regi] = count_arr
-        prob_arrs[regi] = prob_arr       
+            target_arrs[regi] = target_arr
+            count_arrs[regi] = count_arr
+            prob_arrs[regi] = prob_arr
+    else:
+        # pdb.set_trace()       
+        for regi in regs_normal.keys():
+            rows1, cols1 = regs_normal[regi][0], regs_normal[regi][1]
+            rows2, cols2 = regs_50[regi][0], regs_50[regi][1]
+            rows = int(np.max([rows1, rows2]))
+            cols = int(np.max([cols1, cols2]))
+
+            target_arr = [np.ones((rows+1, cols+1))*-1, np.ones((rows+1, cols+1))*-1]
+            count_arr = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+            prob_arr =  [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+
+            target_arrs[regi] = target_arr
+            count_arrs[regi] = count_arr
+            prob_arrs[regi] = prob_arr
 
     # build heatmaps
     for pn, ppl in pred_dict.items():
@@ -777,14 +801,22 @@ def main():
     setattr(args, "model_name", model_name)
     flavor_text = args.model_path.split("/")[-1].split(".")[0]
 
-    # get some evaluation stats
-    num_correct, num_samples, cum_loss, losses, pred_dict = eval_1epoch(args)
-    stats_tup = (num_correct, num_samples, cum_loss, losses)
+    # run eval and get some evaluation stats
+    if os.path.isfile(args.save_path + "/" + flavor_text + "_stats.obj"):
+        print("detected cached stats and predictions dictionaries!")
+        stats_tup = deserialize(args.save_path + "/" + flavor_text + "_stats.obj")
+        pred_dict = deserialize(args.save_path + "/" + flavor_text + "_preddict.obj")
+    else:
+        print("beginning evaluation...")
+        num_correct, num_samples, cum_loss, losses, pred_dict = eval_1epoch(args)
+        stats_tup = (int(num_correct), int(num_samples), cum_loss)
+        serialize(stats_tup, args.save_path + "/" + flavor_text + "_stats.obj")
+        serialize(pred_dict, args.save_path + "/" + flavor_text + "_preddict.obj")
+    
     print("Here are some quick performance stats!")
     print(stats_tup)
-    serialize(stats_tup, args.save_path + "/" + flavor_text + "_stats.obj")
-    serialize(pred_dict, args.save_path + "/" + flavor_text + "_preddict.obj")
-
+ 
+    # pdb.set_trace()
     # make PPM dictionaries for plotting later
     regs_normal, regs_50, imgdim_dict = image_patch_summary(pred_dict, args.reference_path, args.patch_size, args)
     serialize(regs_normal, args.save_path + "/" + flavor_text + "_regs_normal.obj")

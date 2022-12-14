@@ -31,10 +31,10 @@ import imutils
 import cv2
 from skimage.metrics import structural_similarity as ssim
 from skimage import morphology
-from pyscagnostics import scagnostics
+# from pyscagnostics import scagnostics # broken with new packages?
 from scipy.spatial import distance
 
-from dataloader import DataLoader
+from dataloader import DataLoaderCustom
 from train import Flatten
 from preprocess import inflate_2by2
 import pdb
@@ -132,13 +132,14 @@ def compute_attention_maps(X, y, model, model_class, channel_dim=1):
         return None
 
 def compute_gradcam_maps(X, y, model, model_class, channel_dim=1):
+    # https://jacobgil.github.io/pytorch-gradcam-book/introduction.html
     if channel_dim <= 3:
         if model_class.startswith("VGG19"):
-            pdb.set_trace()
-            target_layers = [model.layer4[-1]]
+            target_layers = [model.features[-1]] # recommended from above link
         elif model_class == "VGG_att":
             pdb.set_trace()
-        elif model_class =="ViT"
+        elif model_class =="ViT":
+            target_layers = [model.blocks[-1].norm1] # recommended from above link
             pdb.set_trace()
 
         cam = GradCAM(model=model, target_layers=target_layers, use_cuda=True)
@@ -159,7 +160,7 @@ def show_explanation_maps(X, y, model, args, plot_flag=False):
     # Compute saliency maps for images in X
     saliency = compute_saliency_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim)
     attention = compute_attention_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim)
-    gradcam = compute_gradcam_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim):
+    gradcam = compute_gradcam_maps(X_tensor, y_tensor, model, args.model_class, args.channel_dim)
 
     # Convert the saliency map from Torch Tensor to numpy array and show images
     # and saliency maps together of whole batch.
@@ -167,6 +168,8 @@ def show_explanation_maps(X, y, model, args, plot_flag=False):
 
     if attention is not None:
         attention = attention.detach().cpu().numpy() 
+    # if gradcam is not None:
+    #     gradcam = gradcam.numpy() 
 
     if plot_flag == True:
         N = X.shape[0]
@@ -186,42 +189,77 @@ def show_explanation_maps(X, y, model, args, plot_flag=False):
 def stitch_expmaps(saliency_loader_stitch, model_pt, args, regs_normal, regs_50, imgdim_dict, pred_dict):
     mode = args.saliency_resolution
 
+    patch_names = list(pred_dict.keys())
+    if "patient" in patch_names[0] and args.dataset_name == "cam":
+        multi_sample_flag = True
+    else:
+        multi_sample_flag = False
+
     # instantiate all giant arrays based on sizes
     saliency_dict = {}
     attention_dict = {}
+    gradcam_dict = {}
     ps = args.patch_size
 
-    for regi in imgdim_dict.keys():
-        [rows, cols] = imgdim_dict[regi]
-        if mode == "patch":
-            saliency_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
-            attention_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
-        elif mode == "pixels":
-            saliency_dict[regi] = [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
-            attention_dict[regi] = [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+    if imgdim_dict is not None:
+        for regi in imgdim_dict.keys():
+            [rows, cols] = imgdim_dict[regi]
+            if mode == "patch":
+                saliency_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+                attention_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+                gradcam_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+            elif mode == "pixels":
+                saliency_dict[regi] = [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+                attention_dict[regi] = [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+                gradcam_dict[regi] =  [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+    else:
+        for regi in regs_normal.keys():
+            rows1, cols1 = regs_normal[regi][0], regs_normal[regi][1]
+            rows2, cols2 = regs_50[regi][0], regs_50[regi][1]
+            rows = int(np.max([rows1, rows2]))
+            cols = int(np.max([cols1, cols2]))
 
+            if mode == "patch":
+                saliency_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+                attention_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+                gradcam_dict[regi] = [np.zeros((rows+1, cols+1)), np.zeros((rows+1, cols+1))]
+            elif mode == "pixels":
+                saliency_dict[regi] = [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+                attention_dict[regi] = [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+                gradcam_dict[regi] =  [np.zeros((rows*ps, cols*ps)), np.zeros((rows*ps, cols*ps))]
+ 
     # now check through all patches
     for i, (fxy, X, y) in enumerate(saliency_loader_stitch):
-
-        patch_sal_map, patch_att_map = show_explanation_maps(X, y, model_pt, args, plot_flag=False)
-
-        for exmap_idx, exmap in enumerate([patch_sal_map, patch_att_map]):
+        patch_sal_map, patch_att_map, patch_cam_map = show_explanation_maps(X, y, model_pt, args, plot_flag=False)
+        for exmap_idx, exmap in enumerate([patch_sal_map, patch_att_map, patch_cam_map]):
             if torch.is_tensor(exmap) == False and isinstance(exmap, np.ndarray) == False: # if attention is empty/None for VGG19
                 if exmap is None:
                 # exmap == []: 
                     continue
+
             if exmap_idx == 0:
                 exdict = saliency_dict
             elif exmap_idx == 1:
                 exdict = attention_dict
+            elif exmap_idx == 2:
+                exdict = gradcam_dict
 
             for j, pn in enumerate(fxy):
-                contents = pn.split("_")
-                regi = contents[0]
-                patchnum = int(contents[1].split("patch")[1])
-                coords = contents[2]
-                shift = contents[3]
-                aug = contents[4].split(".npy")[0]
+                if multi_sample_flag == False:
+                    contents = pn.split("_")
+                    regi = contents[0]
+                    patchnum = int(contents[1].split("patch")[1])
+                    coords = contents[2]
+                    shift = contents[3]
+                    aug = contents[4].split(".npy")[0]
+                else:
+                    contents = pn.split("_")
+                    regi = contents[0] + "_" + contents[1] + "_" + contents[2] + "_" + contents[3]
+                    patchnum = int(contents[4].split("patch")[1])
+                    coords = contents[5]
+                    shift = contents[6]
+                    aug = contents[7]
+                    
                 if aug != "noaug":
                     continue # only interested in non-augmented patches; used as a sanity check
             
@@ -243,7 +281,7 @@ def stitch_expmaps(saliency_loader_stitch, model_pt, args, regs_normal, regs_50,
                         exdict[regi][1][x1:x2, y1:y2] = exmap[j,:,:].squeeze()            
 
     # merge overlaps
-    for exdict in [saliency_dict, attention_dict]:
+    for exdict in [saliency_dict, attention_dict, gradcam_dict]:
         if exdict == {}:
             continue
         for regi, sal_arri in exdict.items():
@@ -281,7 +319,7 @@ def stitch_expmaps(saliency_loader_stitch, model_pt, args, regs_normal, regs_50,
             # overwrite with overlap/overlay
             exdict[regi] = sal_arri
 
-    return saliency_dict, attention_dict
+    return saliency_dict, attention_dict, gradcam_dict
 
 
 
@@ -1341,13 +1379,13 @@ def main():
     # ARGPARSE
     #---------
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', default=None, type=str, help="Where you'd like to save the model outputs.")
+    parser.add_argument('--model_path', default=None, type=str, help="Where you'd like to load the model from.")
     parser.add_argument('--model_class', default=None, type=str, help='Select one of: VGG19/VGG19_bn/VGG_att.')
 
     parser.add_argument('--batch_size', default=36, type=int, help="Batch size. Default is 36.")
     parser.add_argument('--channel_dim', default=1, type=int, help="Channel dimension. Default is 1.")
     parser.add_argument('--dataset_name', default=None, type=str, help="What you want to name your dataset. For pre-defined label dictionaries, use: u54codex to search utils.")
-    parser.add_argument('--dataloader_type', default="stored", type=str, help="Type of data loader: stored vs otf (on-the-fly).")
+    parser.add_argument('--dataloader_type', default="stored", type=str, help="Type of data loader: stored vs otf (on-the-fly) vs hdf5.")
     parser.add_argument('--patch_size', default=96, type=int, help="Patch/instance size. Default is 96.")
     parser.add_argument('--cache_name', default=None, type=str, help="Cached name for dictionaries.")
 
@@ -1379,19 +1417,25 @@ def main():
 
     # make maps
     #-----------
-    saliency_loader_stitch = DataLoader(args)
+    saliency_loader_stitch = DataLoaderCustom(args)
     model_pt = torch.load(args.model_path, map_location=device)
-
     flavor_text = args.model_path.split("/")[-1].split(".")[0]
 
     regs_normal = utils.deserialize(args.save_path + "/" + flavor_text + "_regs_normal.obj")
     regs_50 = utils.deserialize(args.save_path + "/" + flavor_text + "_regs_50.obj")
-    imgdim_dict = utils.deserialize(args.save_path + "/" + args.cache_name + "-imgdim_dict.obj")
+    
+    if args.dataloader_type == "hdf5":
+        imgdim_dict = None
+    else:
+        imgdim_dict = utils.deserialize(args.save_path + "/" + args.cache_name + "-imgdim_dict.obj")
+    
     pred_dict = utils.deserialize(args.save_path + "/" + flavor_text + "_preddict.obj")
 
-    saliency_dict, attention_dict = stitch_expmaps(saliency_loader_stitch, model_pt, args, regs_normal, regs_50, imgdim_dict, pred_dict)
+    saliency_dict, attention_dict, gradcam_dict = stitch_expmaps(saliency_loader_stitch, model_pt, args, regs_normal, regs_50, imgdim_dict, pred_dict)
     utils.serialize(saliency_dict, args.save_path + "/" + flavor_text + "_saliency_dict.obj")
     utils.serialize(attention_dict, args.save_path + "/" + flavor_text + "_attention_dict.obj")
+    utils.serialize(gradcam_dict, args.save_path + "/" + flavor_text + "_gradcam_dict.obj")
+
     print("FINISHED EXPLANATIONS")
 
 

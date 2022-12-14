@@ -51,14 +51,13 @@ thresh_dict = {"beaker-wikipedia.jpeg":[0.01,0.98,10],
                "calcifer-syfywire.jpeg":[0.02,0.9,10]
               }
 
-blank_chs = [82, 81, 79, 78, 77, 74, 73, 69, 65]
-
-ch_names = "/home/groups/plevriti/gautam/codex_analysis/codex-analysis/data_u54/channelNames.txt" 
-chs = pd.read_csv(ch_names, header=None)
-chs.columns = ["name"]
-chs = chs.drop(chs.index[blank_chs])
-chs = chs.reset_index(drop=True)
-ch_dict = chs.T.to_dict("records")[0]
+# blank_chs = [82, 81, 79, 78, 77, 74, 73, 69, 65]
+# ch_names = "/home/groups/plevriti/gautam/codex_analysis/codex-analysis/data_u54/channelNames.txt" 
+# chs = pd.read_csv(ch_names, header=None)
+# chs.columns = ["name"]
+# chs = chs.drop(chs.index[blank_chs])
+# chs = chs.reset_index(drop=True)
+# ch_dict = chs.T.to_dict("records")[0]
 
 codex_dir = "/home/groups/plevriti/gautam/codex_analysis/codex-analysis/"
 code_dir = codex_dir + "code/"
