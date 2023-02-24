@@ -7,6 +7,8 @@ import torch
 import h5py
 from pathlib import Path
 import pdb
+import itertools
+
 from sklearn.preprocessing import KBinsDiscretizer
 from torchvision.io import read_image
 from torch.utils.data import Dataset, DataLoader
@@ -356,17 +358,84 @@ def reduce_Z(Z, kmeans_model):
                 Zij = Zij.reshape(1, -1)
                 cluster = kmeans_model.predict(Zij)
                 Z_viz[i,j,:] = cluster
-    return Z_viz   
+    return Z_viz, zero_id   
+
+
+def colocalization(C, labels, nbhd_size=1):
+    """
+    takes cluster labels and computes the counts for each label interaction
+    """
+    combo_dict = {}
+    combos = itertools.combinations_with_replacement(labels, 2)
+    bg = np.max(labels) + 1.0
+    for combo in combos:
+        if combo[0] == bg or combo[1] == bg: # skip bg tokens
+            continue 
+        combo_dict[combo] = 0
+
+    H,W,_ = C.shape
+    C_pad = np.ones((H+nbhd_size+1, W+nbhd_size+1)) * -1
+    C_pad[nbhd_size:H+nbhd_size, nbhd_size:W+nbhd_size] = C[:,:,0]
+    # print(C_pad[0,:], C_pad[-1,:], C_pad[:,0], C_pad[:,-1])
+    num_valid = 0
+
+    for i in range(nbhd_size, H+nbhd_size):
+        for j in range(nbhd_size, W+nbhd_size):
+            cij = C_pad[i,j]
+            if (cij == -1.0) or (cij == bg): # padding or bg labels
+                continue
+            nbhd = C_pad[i-nbhd_size:i+nbhd_size+1, j-nbhd_size:j+nbhd_size+1]
+            unique, counts = np.unique(nbhd, return_counts=True)
+            for idx,u in enumerate(unique):
+                if (u == -1.0) or (u == bg): # padding or bg labels
+                    continue
+                if u >= cij:
+                    combo_dict[(cij,u)] = counts[idx]
+                    correct_ordering = (cij,u)
+                else:
+                    combo_dict[(u,cij)] = counts[idx]
+                    correct_ordering = (u,cij)
+                if u == cij: # additional step
+                    combo_dict[correct_ordering] -= 1
+                num_valid += combo_dict[correct_ordering]
+    return combo_dict, num_valid
+
+
+def baggify(C, all_cluster_labs):
+    unique, counts = np.unique(C, return_counts=True)
+    cluster_dict = {}
+    num_valid = 0
+    bg = np.max(all_cluster_labs) + 1.0
+    for cl in all_cluster_labs:
+        if cl == bg: # skip bg tokens
+            continue
+        cluster_dict[cl] = 0
+
+    for i,u in enumerate(unique):
+        if u == bg: # skip bg tokens
+            continue
+        try:
+            cluster_dict[u] += counts[i]
+            num_valid += counts[i]
+        except KeyError: # skip background
+            pass
+    return cluster_dict, num_valid
 
 
 class EmbedDataset(Dataset):
-    def __init__(self, data_dir, label_dict_path, split_list, mode, kmeans_model):
+    def __init__(self, data_dir, label_dict_path, split_list, mode, kmeans_model, arm, nbhd_size=2):
         self.data_dir = data_dir
         self.label_dict = utils.deserialize(label_dict_path)
+        # print(self.label_dict)
         all_Zs = os.listdir(data_dir)
-        self.Zs = [Z for Z in all_Zs if Z in split_list]
+        if split_list == [] or split_list == None:
+            self.Zs = all_Zs
+        else:
+            self.Zs = [Z for Z in all_Zs if Z in split_list]
         self.mode = mode
         self.kmeans_model = kmeans_model
+        self.arm = arm
+        self.nbhd_size = nbhd_size
 
     def __len__(self):
         return len(self.Zs)
@@ -374,44 +443,43 @@ class EmbedDataset(Dataset):
     def get_label(self, fname):
         id_num = fname.split(".npy")[0]
         reg_id = id_num.split("-")[1]
-        label = self.label_dict[reg_id]
+        if self.arm == "val":
+            reg_id = reg_id + ".tif"
+        label = int(self.label_dict[reg_id])
         return label
     
     def __getitem__(self, idx):
         Z_id = self.Zs[idx]        
         y = self.get_label(Z_id)
         Z = np.load(self.data_dir + "/" + Z_id)
+        
         if self.mode == "fullZ":
             pass
         elif self.mode == "clusterZ":
-            Z = reduce_Z(Z, self.kmeans_model)
-        elif self.mode == "clusterbag":
-            Z = reduce_Z(Z, self.kmeans_model)
-            unique, counts = np.unique(Z, return_counts=True)
-            Z = np.array(counts)
+            Z, _ = reduce_Z(Z, self.kmeans_model)
+        
+        elif self.mode == "clusterbag" or self.mode == "coclusterbag":
+            C, _ = reduce_Z(Z, self.kmeans_model)
+            all_cluster_labs, _ = np.unique(self.kmeans_model.labels_, return_counts=True)
+            bag_dict, num_valid = baggify(C, all_cluster_labs)
+            Z = np.array([bag_dict[key] for key in sorted(bag_dict.keys())]) / num_valid
+            if self.mode == "coclusterbag":
+                coloc_dict, num_valid = colocalization(C, all_cluster_labs, nbhd_size=self.nbhd_size)
+                Z_annex = np.array([coloc_dict[key] for key in sorted(coloc_dict.keys())]) / num_valid
+                Z = np.concatenate([Z, Z_annex])        
         elif self.mode == "meanpool":
-            Z_vec = np.mean(Z, axis=2)
-            one_channel = np.sum(Z, axis=(1,2))
+            # print("Z", Z.shape)
+            one_channel = np.sum(Z, axis=2) > 0
             n_nonzero = np.count_nonzero(one_channel)
-            n = Z.shape[0] * Z.shape[1]
-            Z = Z_vec * (n/n_nonzero)
+            Z_vec = np.sum(Z, axis=(0,1))
+            Z = Z_vec / n_nonzero
         elif self.mode == "maxpool":
-            Z_vec = np.max(Z, axis=2)
-            one_channel = np.sum(Z, axis=(1,2))
-            n_nonzero = np.count_nonzero(one_channel)
-            n = Z.shape[0] * Z.shape[1]
-            Z = Z_vec * (n/n_nonzero)
+            Z = np.max(Z, axis=(0,1))
         elif self.mode == "meanmaxpool":
-            Z_vec = np.mean(Z, axis=2)
-            one_channel = np.sum(Z, axis=(1,2))
+            one_channel = np.sum(Z, axis=2) > 0
             n_nonzero = np.count_nonzero(one_channel)
-            n = Z.shape[0] * Z.shape[1]
-            Z_mean = Z_vec * (n/n_nonzero)
-            Z_vec = np.max(Z, axis=2)
-            one_channel = np.sum(Z, axis=(1,2))
-            n_nonzero = np.count_nonzero(one_channel)
-            n = Z.shape[0] * Z.shape[1]
-            Z_max = Z_vec * (n/n_nonzero)
-            Z = np.stack([Z_mean, Z_max])
-
+            Z_vec = np.sum(Z, axis=(0,1))
+            Z_mean = Z_vec / n_nonzero
+            Z_max = np.max(Z, axis=(0,1))
+            Z = np.concatenate([Z_mean, Z_max])
         return Z, y

@@ -556,17 +556,18 @@ def process_patch(im, im_id, q_low, patches, shift, args, patch_tossed_i, patch_
         if args.dataset_name == "cam":
             # print("image is of size:", im.shape)
             # print("curr_row", curr_row, "imgheight", imgheight, "imgwidth", imgwidth, x1, x2)
-            if curr_row < (imgheight * (1/6) / args.HW) or curr_row > (imgheight * (5/6) / args.HW):
-                patch_tossed_i += 1
-                patch_tossed += 1
-                del tile
-                #print("patch in top or bottom 1/6th of slide. skipping...")
-                continue
-            if curr_col < (imgwidth * (1/8) / args.HW) or curr_col > (imgwidth * (7/8) / args.HW):
-                patch_tossed_i += 1
-                patch_tossed += 1
-                del tile
-                continue
+            if args.study_arm == "train":
+                if curr_row < (imgheight * (1/6) / args.HW) or curr_row > (imgheight * (5/6) / args.HW):
+                    patch_tossed_i += 1
+                    patch_tossed += 1
+                    del tile
+                    #print("patch in top or bottom 1/6th of slide. skipping...")
+                    continue
+                if curr_col < (imgwidth * (1/8) / args.HW) or curr_col > (imgwidth * (7/8) / args.HW):
+                    patch_tossed_i += 1
+                    patch_tossed += 1
+                    del tile
+                    continue
 
         if args.filtration_type == "background": # if not, we keep all patches including noisy background
             if toss_blank_tile(tile, q_low, args.dataset_name, thresh_tile=thresh_tile, bg_remove_flag=bool(args.bg_remove_flag*detected_zero_flag)): # blank patch

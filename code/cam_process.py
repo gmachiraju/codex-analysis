@@ -2,7 +2,7 @@ import argparse
 import ftplib
 import os
 import pdb
-import openslide
+# import openslide
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -64,16 +64,20 @@ def process_image(sample_id, data_path, save_path, level=LV):
     print("")
     
     
-def parse_xml(xml_file, reduction=None):
+def parse_xml(xml_file, reduction=None, verbosity="low"):
     save_list, ys, xs = [], [], []
     annot_count = 0
+    open_flag = False
     with open(xml_file, 'r') as infile:
         for i, line in enumerate(infile):
-            if "<Annotation Name=" in line:
+            if verbosity == "high":
+                print(line)
+            if ('<Annotation Name=' in line) and ((("_1" in line) or ("_0" in line) or ("Tumor" in line))):
                 annot_count += 1
                 annot = []
                 x, y = [], []
-            elif "<Coordinate Order=" in line:
+                open_flag = True
+            elif ("<Coordinate Order=" in line) and (open_flag == True):
                 xy = line.split(" ")[2:4]
                 xy = [float(xy[0].split("=")[1].strip('\"')), float(xy[1].split("=")[1].strip('\"'))]
                 if reduction:
@@ -81,16 +85,16 @@ def parse_xml(xml_file, reduction=None):
                 x.append(xy[0]) 
                 y.append(xy[1])
                 annot.append(xy)
-            elif "</Annotation>" in line:
+            elif ("</Annotation>" in line) and (open_flag == True): 
                 if annot_count > 0:
                     save_list.append(annot)
                     xs.append(x)
                     ys.append(y)
-
+                open_flag = False # close annotation
     return save_list, ys, xs
 
 
-def view_mask(sample_id, xml_path, data_path, save_path):
+def view_mask_elements(sample_id, xml_path, data_path, save_path):
     xml_file = xml_path + "/" + sample_id + ".xml"
     img_file = data_path + "/" + sample_id + ".tif"
     dim, new_dim, desired_downsample = get_imgdims(sample_id, data_path)
@@ -103,7 +107,6 @@ def view_mask(sample_id, xml_path, data_path, save_path):
         zoom = image[x_min:x_max, y_min:y_max]
         plt.figure()
         plt.imshow(zoom, cmap="gray")
-
 
 
 def process_downsampled_mask(sample_id, xml_path, data_path, save_path):
@@ -179,6 +182,83 @@ def process_patch_mask(sample_id, xml_path, data_path, save_path, patch_size=224
     print("of shape:", mask.shape)
     print("")
 
+
+def computeEvaluationMaskXML_lowres(xmlDIR, og_dims, resolution, level):
+    scale_factor = 2**level
+    # w,h for cv2
+    print("og dims:", og_dims)
+    desired_dims = (og_dims[0] // scale_factor, og_dims[1] // scale_factor)
+    print("desired dims", desired_dims)
+    save_list, xs, ys = parse_xml(xmlDIR, reduction=scale_factor)
+    if len(save_list) == 0:
+        save_list, xs, ys = parse_xml(xmlDIR, reduction=None, verbosity="high")
+        print(save_list)
+        print("breaking...")
+        return None
+    # print(save_list)
+    mask = np.zeros(desired_dims)
+    print("processing", len(save_list), "ROIs...")
+    for i in range(len(save_list)):
+        image = draw.polygon2mask(desired_dims, np.stack((xs[i], ys[i]), axis=1))
+        mask += image.astype(float)
+        del image
+    print("number of mask pixels:", np.sum(mask))
+    return mask
+
+
+def computeEvaluationMaskXML(xmlDIR, og_dims, resolution, level):
+    scale_factor = 2**level
+    desired_dims = (og_dims[0] // scale_factor, og_dims[1] // scale_factor)
+    save_list, xs, ys = parse_xml(xmlDIR, reduction=None)
+    print("done parsing XML...")
+    mask = np.zeros(desired_dims)
+    for i in range(len(save_list)):
+        print("starting on ROI:", i)
+        xmin, xmax = np.min(xs[i]), np.max(xs[i])
+        ymin, ymax = np.min(ys[i]), np.max(ys[i])
+        roi_crop = np.zeros((int(xmax-xmin), int(ymax-ymin)))
+        image = draw.polygon2mask(roi_crop.shape, np.stack((xs[i] - xmin, ys[i] - ymin), axis=1))
+        # width, height for cv2
+        desired_crop_dims = roi_crop.shape[1] // scale_factor, roi_crop.shape[0] // scale_factor
+        image = cv2.resize(np.float32(image), desired_crop_dims, interpolation=cv2.INTER_AREA)
+        i0,i1 = int(xmin//scale_factor), int(xmax//scale_factor)
+        j0,j1 = int(ymin//scale_factor), int(ymax//scale_factor)
+        h,w = image.shape
+        
+        mask[i0:i0+h, j0:j0+w] = image
+        del image
+        print("finished ROI:", i)
+    return mask
+
+
+def computeEvaluationMaskXML_mosaic(xmlDIR, og_dims, resolution, level, ps=224):
+    scale_factor = 2**level
+    desired_dims = (og_dims[0] // (scale_factor * 224), og_dims[1] // (scale_factor * 224))
+    save_list, xs, ys = parse_xml(xmlDIR, reduction=scale_factor)
+    if len(save_list) == 0:
+        save_list, xs, ys = parse_xml(xmlDIR, reduction=None, verbosity="high")
+        print(save_list)
+        print("breaking...")
+        return None
+    print("done parsing XML...have #ROIs:", len(save_list))
+    mask = np.zeros(desired_dims)
+    for i in range(len(save_list)):
+        image = draw.polygon2mask(desired_dims, np.stack((xs[i], ys[i]), axis=1))
+        image = skimage.measure.block_reduce(image, block_size=(ps, ps), func=np.mean)
+        try:
+            mask += image
+        except ValueError: # still a missmatch
+            print("Detecting a mismatch in annotation and overall mask dimensions... adjusting")
+            # assuming smaller iamge than mask by 1 row/col
+            if image.shape[0] > mask.shape[0]: # height
+                image = image[:-1, :]
+            if image.shape[1] > mask.shape[1]: # width
+                image = image[:, :-1]
+            mask += image
+        del image
+
+    mask = mask > 0
+    return mask
 
 
 if __name__ == "__main__":

@@ -806,14 +806,24 @@ def train_selfsup(model, device, optimizer, args, margin=10, l2=0.01, print_ever
 		std /= (idx * batch_samples * 3)
 		print("Approximated dataset mean and std (per channel):", mean, std)
 
-
-	print("\nBeginning training!")
 	model = model.to(device=device)
 	model.train()
-	for e in range(0 + args.prev_epoch, args.num_epochs + args.prev_epoch):
+
+	# get a previous run backup
+	if args.prev_epoch > 0:
+		print("Cacheing previous state dict with prefix: PREVRUN")
+		torch.save({
+            'epoch': args.prev_epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': None,
+            }, args.model_path + "/PREVRUN-" + args.string_details + ".sd")
+
+	print("\nBeginning training!")
+	for e in range(0 + args.prev_epoch+1, args.num_epochs + args.prev_epoch+1):
 		sum_loss, sum_l_n, sum_l_d, sum_l_nd = (0, 0, 0, 0)
 		print_sum_loss = 0
-
+		mid_save_flag = False
 		# train over all train_loaders: e.g. 0 and 1 class
 		for loader_idx, tl in enumerate(train_loaders):
 			print("On training dataloader #:", loader_idx)
@@ -851,13 +861,23 @@ def train_selfsup(model, device, optimizer, args, margin=10, l2=0.01, print_ever
 					print('Epoch {}: [{}/{} ({:0.0f}%)], Avg loss: {:0.4f}'.format(e, (idx + 1) * args.batch_size, n_train, 100 * (idx + 1) / n_batches, print_avg_loss))
 					print_sum_loss = sum_loss
 
-					# save state every few iterations
+				# save state every few iterations
+				if (mid_save_flag == False) and (((idx + 1) * args.batch_size / n_train) > 0.5):
+					print("----saving model state mid-epoch----")
 					torch.save({
 						'epoch': e,
 						'model_state_dict': model.state_dict(),
 						'optimizer_state_dict': optimizer.state_dict(),
 						'loss': loss,
 						}, args.model_path + "/" + args.string_details + ".sd")
+					# always keep a backup
+					torch.save({
+						'epoch': e,
+						'model_state_dict': model.state_dict(),
+						'optimizer_state_dict': optimizer.state_dict(),
+						'loss': loss,
+						}, args.model_path + "/BACKUP-" + args.string_details + ".sd")
+					mid_save_flag = True
 
 				scheduler.step()
 				
@@ -873,7 +893,7 @@ def train_selfsup(model, device, optimizer, args, margin=10, l2=0.01, print_ever
 		print('  Average l_nd: {:0.4f}'.format(avg_l_nd))
 
 		# save model per epoch
-		print("saving model for epoch\n", e)
+		print("saving model for epoch", e, "\n")
 		torch.save(model, args.model_path + "/" + args.string_details + "_epoch%s.pt" % e)
 		# serialize(train_losses, args.model_path + "/" + args.string_details + "_trainloss.obj")
 		# fig = plt.plot(train_losses, c="blue", label="train loss")
@@ -884,7 +904,20 @@ def train_selfsup(model, device, optimizer, args, margin=10, l2=0.01, print_ever
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': loss,
+            }, args.model_path + "/" + args.string_details + "_epoch%s.sd" % e)
+		torch.save({
+            'epoch': e,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss,
             }, args.model_path + "/" + args.string_details + ".sd")
+		# always keep a backup
+		torch.save({
+            'epoch': e,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss,
+            }, args.model_path + "/BACKUP-" + args.string_details + ".sd")
 
 	# full model save
 	torch.save(model, args.model_path + "/" + args.string_details + "_full.pt")
@@ -1171,8 +1204,8 @@ def main():
 			setattr(args, "learn_rate", lr)
 			optimizer = optim.Adam(model.parameters(), lr=args.learn_rate, betas=(0.5, 0.999)) # used to have manual betas: betas=(0.5, 0.999)
 		else:
-			lr = 1e-3 # bigger dataset
-			setattr(args, "learn_rate", lr) # used to be 1e-3, 1e-2, 5e-2
+			lr = 1e-3 # bigger dataset ; we did 1e-3 for 3.5 epochs (0,1,2,half of 3), 5e-4 for (3,4), 1e-3 for (5,6) / 5e-4 for (5,6)
+			setattr(args, "learn_rate", lr) 
 			optimizer = optim.Adam(model.parameters(), lr=args.learn_rate, betas=(0.5, 0.999)) # used to have manual betas: betas=(0.5, 0.999)
 
 	# load state dicts

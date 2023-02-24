@@ -22,3 +22,5 @@ ASAP-2.1-py310-Ubuntu2004.deb
 .ipynb_checkpoints/
 /code/wandb/
 lightning_logs/
+/wandb/
+/envs/

@@ -2,7 +2,7 @@ import sklearn.metrics
 import pandas as pd
 import argparse
 
-import openslide
+# import openslide
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage as nd
@@ -12,32 +12,33 @@ import sys
 
 from utils import str2bool
 from saliency import jaccard, dice, overlap
+from cam_process import parse_xml
 
 #====================
 # cam16 statistics
 #====================
-def computeEvaluationMask(maskDIR, resolution, level):
-    """Computes the evaluation mask. This is only for Cam16 eval masks (test-set)
+# def computeEvaluationMask(maskDIR, resolution, level):
+#     """Computes the evaluation mask. This is only for Cam16 eval masks (test-set)
     
-    Args:
-        maskDIR:    the directory of the ground truth mask
-        resolution: Pixel resolution of the image at level 0
-        level:      The level at which the evaluation mask is made
+#     Args:
+#         maskDIR:    the directory of the ground truth mask
+#         resolution: Pixel resolution of the image at level 0
+#         level:      The level at which the evaluation mask is made
         
-    Returns:
-        evaluation_mask
-    """
-    slide = openslide.open_slide(maskDIR)
-    dims = slide.level_dimensions[level]
-    pixelarray = np.zeros(dims[0]*dims[1], dtype='uint')
-    pixelarray = np.array(slide.read_region((0,0), level, dims))
-    distance = nd.distance_transform_edt(255 - pixelarray[:,:,0])
-    Threshold = 75/(resolution * pow(2, level) * 2) # 75µm is the equivalent size of 5 tumor cells
-    binary = distance < Threshold
-    filled_image = nd.morphology.binary_fill_holes(binary)
-    evaluation_mask = measure.label(filled_image, connectivity = 2) 
-    return evaluation_mask
-    
+#     Returns:
+#         evaluation_mask
+#     """
+#     slide = openslide.open_slide(maskDIR)
+#     dims = slide.level_dimensions[level]
+#     pixelarray = np.zeros(dims[0]*dims[1], dtype='uint')
+#     pixelarray = np.array(slide.read_region((0,0), level, dims))
+#     distance = nd.distance_transform_edt(255 - pixelarray[:,:,0])
+#     Threshold = 75/(resolution * pow(2, level) * 2) # 75µm is the equivalent size of 5 tumor cells
+#     binary = distance < Threshold
+#     filled_image = nd.morphology.binary_fill_holes(binary)
+#     evaluation_mask = measure.label(filled_image, connectivity = 2) 
+#     return evaluation_mask
+
     
 def computeITCList(evaluation_mask, resolution, level):
     """Compute the list of labels containing Isolated Tumor Cells (ITC)
@@ -79,14 +80,23 @@ def readCSVContent(csvDIR):
         Xcorr:      list of X-coordinates of the lesions
         Ycorr:      list of Y-coordinates of the lesions
     """
-    Xcorr, Ycorr, Probs = ([] for i in range(3))
-    csv_lines = open(csvDIR,"r").readlines()
-    for i in range(len(csv_lines)):
-        line = csv_lines[i]
-        elems = line.rstrip().split(',')
-        Probs.append(float(elems[0]))
-        Xcorr.append(int(elems[1]))
-        Ycorr.append(int(elems[2]))
+    # Xcorr, Ycorr, Probs = ([] for i in range(3))
+    # csv_lines = open(csvDIR,"r").readlines()
+    # for i in range(len(csv_lines)):
+    #     line = csv_lines[i]
+    #     elems = line.rstrip().split(',')
+    #     print(elems)
+    #     Probs.append(float(elems[0]))
+    #     Xcorr.append(int(elems[1]))
+    #     Ycorr.append(int(elems[2]))
+    df = pd.read_csv(csvDIR, header=0)
+    Probs = list(df["Confidence"])
+    Xcorr = list(df["X coordinate"])
+    Ycorr = list(df["Y coordinate"])
+
+    Probs = [int(el) for el in Probs]
+    Xcorr = [int(el) for el in Xcorr]
+    Ycorr = [int(el) for el in Ycorr]
     return Probs, Xcorr, Ycorr
     
          
@@ -132,7 +142,7 @@ def compute_FP_TP_Probs(Ycorr, Xcorr, Probs, is_tumor, evaluation_mask, Isolated
     FP_counter = 0       
     if (is_tumor):
         for i in range(0,len(Xcorr)):
-            HittedLabel = evaluation_mask[Ycorr[i]/pow(2, level), Xcorr[i]/pow(2, level)]
+            HittedLabel = evaluation_mask[Ycorr[i]//pow(2, level), Xcorr[i]//pow(2, level)]
             if HittedLabel == 0:
                 FP_probs.append(Probs[i])
                 key = 'FP ' + str(FP_counter)
@@ -204,62 +214,60 @@ def plotFROC(total_FPs, total_sensitivity):
     plt.show()       
       
 
-#==================
-# cam17 statistics
-#==================
-def calculate_kappa(reference, submission):
-    """
-    Calculate inter-annotator agreement with quadratic weighted Kappa.
-
-    Args:
-        reference (pandas.DataFrame): List of labels assigned by the organizers.
-        submission (pandas.DataFrame): List of labels assigned by participant.
-
-    Returns:
-        float: Kappa score.
-
-    Raises:
-        ValueError: Unknown stage in reference.
-        ValueError: Patient missing from submission.
-        ValueError: Unknown stage in submission.
-    """
-
-    # The accepted stages are pN0, pN0(i+), pN1mi, pN1, pN2 as described on the website. During parsing all strings converted to lowercase.
-    stage_list = ['pn0', 'pn0(i+)', 'pn1mi', 'pn1', 'pn2']
-
-    # Extract the patient pN stages from the tables for evaluation.
-    reference_map = {df_row[0]: df_row[1].lower() for _, df_row in reference.iterrows() if df_row[0].lower().endswith('.zip')}
-    submission_map = {df_row[0]: df_row[1].lower() for _, df_row in submission.iterrows() if df_row[0].lower().endswith('.zip')}
-
-    # Reorganize data into lists with the same patient order and check consistency.
-    reference_stage_list = []
-    submission_stage_list = []
-    for patient_id, reference_stage in reference_map.items():
-        # Check consistency: all stages must be from the official stage list and there must be a submission for each patient in the ground truth.
-        submission_stage = submission_map[patient_id].lower()
-
-        if reference_stage not in stage_list:
-            raise ValueError('Unknown stage in reference: \'{stage}\''.format(stage=reference_stage))
-        if patient_id not in submission_map:
-            raise ValueError('Patient missing from submission: \'{patient}\''.format(patient=patient_id))
-        if submission_stage not in stage_list:
-            raise ValueError('Unknown stage in submission: \'{stage}\''.format(stage=submission_map[patient_id]))
-
-        # Add the pair to the lists.
-        reference_stage_list.append(reference_stage)
-        submission_stage_list.append(submission_stage)
-
-    # Return the Kappa score.
-    return sklearn.metrics.cohen_kappa_score(y1=reference_stage_list, y2=submission_stage_list, labels=stage_list, weights='quadratic')
-
-
+def run_test(mask_folder, result_folder, label_dict):
+    result_file_list = []
+    result_file_list += [each for each in os.listdir(result_folder) if each.endswith('.csv')]
+    
+    EVALUATION_MASK_LEVEL = 5 # Image level at which the evaluation is done
+    L0_RESOLUTION = 0.243 # pixel resolution at level 0
+    
+    FROC_data = np.zeros((4, len(result_file_list)), dtype=np.object)
+    FP_summary = np.zeros((2, len(result_file_list)), dtype=np.object)
+    detection_summary = np.zeros((2, len(result_file_list)), dtype=np.object)
+    
+    caseNum = 0    
+    for case in result_file_list:
+        id = case[0:-4].split("Z-")[1]
+        print('Evaluating Performance on image:', id)
+        csvDIR = os.path.join(result_folder, case)
+        Probs, Xcorr, Ycorr = readCSVContent(csvDIR)
+                
+        is_tumor = bool(label_dict[id]) 
+        if (is_tumor):
+            maskDIR = mask_folder + "/" + id + "_gt.npy"
+            evaluation_mask = np.load(maskDIR).astype(int)
+            # print("heyo")
+            ITC_labels = computeITCList(evaluation_mask, L0_RESOLUTION, EVALUATION_MASK_LEVEL)
+            # print("hey")
+        else:
+            evaluation_mask = 0
+            ITC_labels = []
+            
+        FROC_data[0][caseNum] = case
+        FP_summary[0][caseNum] = case
+        detection_summary[0][caseNum] = case
+        # print("hi")
+        out = compute_FP_TP_Probs(Ycorr, Xcorr, Probs, is_tumor, evaluation_mask, ITC_labels, EVALUATION_MASK_LEVEL)
+        # print("hello")
+        FROC_data[1][caseNum] = out[0]
+        FROC_data[2][caseNum] = out[1]
+        FROC_data[3][caseNum] = out[2]
+        detection_summary[1][caseNum] = out[3]
+        FP_summary[1][caseNum] = out[4]
+        caseNum += 1
+    
+    # Compute FROC curve 
+    total_FPs, total_sensitivity = computeFROC(FROC_data)
+    print("FROC (FPs, sens):", total_FPs, total_sensitivity)
+    
+    # plot FROC curve
+    plotFROC(total_FPs, total_sensitivity)
 
 
 #=================
 # Run analysis
 #=================
 if __name__ == '__main__':
-    
     argument_parser = argparse.ArgumentParser()
     argument_parser.add_argument('--arm', required=True, type=str, help='Either choose: eval, test')
     argument_parser.add_argument('--preds_reference_path',  required=False, type=str, help='reference CSV path')
@@ -268,70 +276,10 @@ if __name__ == '__main__':
     argument_parser.add_argument('--sod_submission_path', required=False, type=str, help='submission mask path')
     args = argument_parser.parse_args()
 
-    # Cam17 eval
-    #------------
-    if args.arm == "val":
-        print("First: computing Prediction performance!" + "="*60)
-        preds_reference_path = args.preds_reference_path
-        preds_submission_path = args.preds_submission_path
-        print('Reference: {path}'.format(path=preds_reference_path))
-        print('Submission: {path}'.format(path=preds_submission_path))
-
-        reference_df = pd.read_csv(preds_reference_path)
-        submission_df = pd.read_csv(preds_submission_path)
-        # trim to make sure they have same entries
-
-        try:
-            kappa_score = calculate_kappa(reference=reference_df, submission=submission_df)
-        except Exception as exception:
-            print(exception)
-        else:
-            print('Score: {score}'.format(score=kappa_score))
-
-        print("Second: computing wsSOD performance!" + "="*60)
-        # do dice, jaccard, overlap
-
-
     # Cam16 eval
     #------------
-    elif args.arm == "test":
+    if args.arm == "test":
         mask_folder = args.sod_reference
         result_folder = args.sod_submission
-
-        result_file_list = []
-        result_file_list += [each for each in os.listdir(result_folder) if each.endswith('.csv')]
-        
-        EVALUATION_MASK_LEVEL = 5 # Image level at which the evaluation is done
-        L0_RESOLUTION = 0.243 # pixel resolution at level 0
-        
-        FROC_data = np.zeros((4, len(result_file_list)), dtype=np.object)
-        FP_summary = np.zeros((2, len(result_file_list)), dtype=np.object)
-        detection_summary = np.zeros((2, len(result_file_list)), dtype=np.object)
-        
-        caseNum = 0    
-        for case in result_file_list:
-            print('Evaluating Performance on image:', case[0:-4])
-            sys.stdout.flush()
-            csvDIR = os.path.join(result_folder, case)
-            Probs, Xcorr, Ycorr = readCSVContent(csvDIR)
-                    
-            is_tumor = case[0:5] == 'Tumor'    
-            if (is_tumor):
-                maskDIR = os.path.join(mask_folder, case[0:-4]) + '_Mask.tif'
-                evaluation_mask = computeEvaluationMask(maskDIR, L0_RESOLUTION, EVALUATION_MASK_LEVEL)
-                ITC_labels = computeITCList(evaluation_mask, L0_RESOLUTION, EVALUATION_MASK_LEVEL)
-            else:
-                evaluation_mask = 0
-                ITC_labels = []
-                
-            FROC_data[0][caseNum] = case
-            FP_summary[0][caseNum] = case
-            detection_summary[0][caseNum] = case
-            FROC_data[1][caseNum], FROC_data[2][caseNum], FROC_data[3][caseNum], detection_summary[1][caseNum], FP_summary[1][caseNum] = compute_FP_TP_Probs(Ycorr, Xcorr, Probs, is_tumor, evaluation_mask, ITC_labels, EVALUATION_MASK_LEVEL)
-            caseNum += 1
-        
-        # Compute FROC curve 
-        total_FPs, total_sensitivity = computeFROC(FROC_data)
-        
-        # plot FROC curve
-        plotFROC(total_FPs, total_sensitivity)
+        label_dict = args.label_dict
+        run_test(mask_folder, result_folder, label_dict)

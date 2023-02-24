@@ -5,14 +5,14 @@ conda activate /home/codex_analysis/codex-analysis/envs
 # ================= MODIFY =========================
 # current models for backbone: VGG19_bn, VGG_att, ViT
 model_class=ResNet18
-ne=5 # usually like 1-10
+ne=2 # usually like 1-10
 overfit_flag=False
 
 # model1="/home/codex_analysis/codex-analysis/models/cam/VGG19_bn-hdf5_random_loading-224-label_inherit-bce_loss-on_cam-cam16-filtration_background_epoch7.pt"
 # model1="/home/codex_analysis/codex-analysis/models/cam/ResNet18-hdf5_triplets_random_loading-224-label_selfsup-custom_loss-on_cam-cam16-filtration_background_epoch4.pt"
 # model1="/home/codex_analysis/codex-analysis/models/cam/CARTA-ResNet18-hdf5_triplets_random_loading-224-label_selfsup-custom_loss-on_cam-cam16-filtration_background.sd"
 
-# model1="/home/codex_analysis/codex-analysis/models/cam/ResNet18-hdf5_triplets_random_loading-224-label_selfsup-custom_loss-on_cam-cam16-filtration_background.sd"
+model1="/home/codex_analysis/codex-analysis/models/cam/ResNet18-hdf5_triplets_random_loading-224-label_selfsup-custom_loss-on_cam-cam16-filtration_background_epoch13.sd"
 
 selfsup_mode=mix        # mix for regular self-sup  // sextuplet for carta
 coaxial_flag=False      # False for regular self-sup // True for carta
@@ -59,4 +59,4 @@ desc=${model_class}"-"${dlt}"_"${pload}"_loading-"${ps}"-label_"${plab}"-"${plos
 script=/home/codex_analysis/codex-analysis/code/train.py
 
 # --model_to_load ${model1}
-python ${script} --coaxial_flag ${coaxial_flag} --overfit_flag ${overfit_flag}  --selfsup_flag ${selfsup_flag} --trip0_path ${trip0_path} --trip1_path ${trip1_path} --selfsup_mode ${selfsup_mode}  --description ${desc} --model_class ${model_class} --num_epochs ${ne} --hyperparameters ${hp} --batch_size ${bs} --channel_dim ${cd} --normalize_flag ${nf} --dataset_name ${dn} --dataloader_type ${dlt} --patch_size ${ps} --patch_loading ${pload} --patch_labeling ${plab} --patch_loss ${ploss} --data_path ${dp} --patchlist_path ${plp} --labeldict_path ${ldp} --model_path ${mp} --cache_path ${cp} --save_embeds_flag ${save_embeds_flag} --gamified_flag ${gamified_flag} --backprop_level ${backprop_level} --pool_type ${pool_type}
+python ${script} --coaxial_flag ${coaxial_flag} --model_to_load ${model1} --overfit_flag ${overfit_flag}  --selfsup_flag ${selfsup_flag} --trip0_path ${trip0_path} --trip1_path ${trip1_path} --selfsup_mode ${selfsup_mode}  --description ${desc} --model_class ${model_class} --num_epochs ${ne} --hyperparameters ${hp} --batch_size ${bs} --channel_dim ${cd} --normalize_flag ${nf} --dataset_name ${dn} --dataloader_type ${dlt} --patch_size ${ps} --patch_loading ${pload} --patch_labeling ${plab} --patch_loss ${ploss} --data_path ${dp} --patchlist_path ${plp} --labeldict_path ${ldp} --model_path ${mp} --cache_path ${cp} --save_embeds_flag ${save_embeds_flag} --gamified_flag ${gamified_flag} --backprop_level ${backprop_level} --pool_type ${pool_type}
